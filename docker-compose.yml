@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: design-platform-postgres
+    environment:
+      POSTGRES_USER: surojit
+      POSTGRES_PASSWORD: design_password
+      POSTGRES_DB: grpx
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U surojit -d grpx"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache & Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: design-platform-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Django Backend API
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: design-platform-api
+    command: >
+      sh -c "cd apps/api &&
+             python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+    environment:
+      - DATABASE_URL=postgresql://surojit:design_password@postgres:5432/grpx
+      - REDIS_URL=redis://redis:6379/0
+      - DJANGO_SECRET_KEY=dev-secret-key-change-in-production
+      - DJANGO_DEBUG=True
+      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,api
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps/api:/app/api
+      - ./packages/design-schema:/app/design-schema
+
+  # Celery Worker for async tasks
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    container_name: design-platform-worker
+    command: >
+      sh -c "cd apps/api &&
+             celery -A config worker -l info"
+    environment:
+      - DATABASE_URL=postgresql://surojit:design_password@postgres:5432/grpx
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DJANGO_SECRET_KEY=dev-secret-key-change-in-production
+    depends_on:
+      - postgres
+      - redis
+      - api
+    volumes:
+      - ./apps/api:/app/api
+      - ./packages/design-schema:/app/design-schema
+
+  # Next.js Frontend
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: design-platform-web
+    command: npm run dev
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+      - NODE_ENV=development
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: design-platform-network
