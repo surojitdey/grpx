@@ -34,7 +34,8 @@ export default function DesignsPage() {
             setLoading(true);
             const response = await designApi.getDesigns();
             // Handle paginated response from DRF
-            const designsData = Array.isArray(response.data) ? response.data : response.data.results || [];
+            const data: any = response.data;
+            const designsData = Array.isArray(data) ? data : (data?.results || []);
             setDesigns(designsData);
         } catch (err) {
             console.error('Failed to load designs:', err);
@@ -56,20 +57,20 @@ export default function DesignsPage() {
                 status: 'draft'
             });
             router.push(`/editor/${response.data.id}`);
-        } catch (err) {
+        } catch (err: any) {
             console.error('Failed to create design:', err);
 
             // Extract error message from various sources
             let errorMessage = 'Failed to create design. Please try again.';
-            if (err.response?.data?.detail) {
+            if (err?.response?.data?.detail) {
                 errorMessage = err.response.data.detail;
-            } else if (err.response?.data?.non_field_errors?.[0]) {
+            } else if (err?.response?.data?.non_field_errors?.[0]) {
                 errorMessage = err.response.data.non_field_errors[0];
-            } else if (err.response?.data?.name?.[0]) {
+            } else if (err?.response?.data?.name?.[0]) {
                 errorMessage = `Name: ${err.response.data.name[0]}`;
-            } else if (typeof err.response?.data === 'string') {
+            } else if (typeof err?.response?.data === 'string') {
                 errorMessage = err.response.data;
-            } else if (err.message) {
+            } else if (err?.message) {
                 errorMessage = err.message;
             }
 

@@ -50,6 +50,7 @@ interface EditorState {
     removeObject: (id: string) => void;
     updateObject: (id: string, updates: Partial<DesignObject>) => void;
     reorderObject: (id: string, direction: 'up' | 'down' | 'top' | 'bottom') => void;
+    duplicateObject: (id: string) => void;
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -152,27 +153,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         }),
 
     updateObject: (id, updates) =>
-        set((state) => {
+        set((state: any) => {
             if (!state.design || !state.currentPageId) return state;
             return {
                 design: {
                     ...state.design,
-                    pages: state.design.pages.map((p) =>
+                    pages: state.design.pages.map((p: any) =>
                         p.id === state.currentPageId
                             ? {
                                 ...p,
                                 document: {
                                     ...p.document,
-                                    objects: p.document.objects.map((obj) =>
+                                    objects: p.document.objects.map((obj: any) =>
                                         obj.id === id ? { ...obj, ...updates } : obj
                                     ),
                                 },
                             }
                             : p
                     ),
-                },
+                } as any,
             };
-        }),
+        }) as any,
 
     reorderObject: (id, direction) =>
         set((state) => {
@@ -212,6 +213,43 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                             : p
                     ),
                 },
+            };
+        }),
+
+    duplicateObject: (id) =>
+        set((state) => {
+            if (!state.design || !state.currentPageId) return state;
+            const page = state.design.pages.find((p) => p.id === state.currentPageId);
+            if (!page) return state;
+
+            const objectToDuplicate = page.document.objects.find((obj) => obj.id === id);
+            if (!objectToDuplicate) return state;
+
+            // Create a copy with a new ID, offset position slightly
+            const { v4: uuidv4 } = require('uuid');
+            const duplicated: DesignObject = {
+                ...JSON.parse(JSON.stringify(objectToDuplicate)),
+                id: `obj_${uuidv4()}`,
+                x: objectToDuplicate.x + 20,
+                y: objectToDuplicate.y + 20,
+            };
+
+            return {
+                design: {
+                    ...state.design,
+                    pages: state.design.pages.map((p) =>
+                        p.id === state.currentPageId
+                            ? {
+                                ...p,
+                                document: {
+                                    ...p.document,
+                                    objects: [...p.document.objects, duplicated],
+                                },
+                            }
+                            : p
+                    ),
+                },
+                selectedObjectIds: [duplicated.id],
             };
         }),
 }));
