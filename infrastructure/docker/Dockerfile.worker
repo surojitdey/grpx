@@ -1,0 +1,26 @@
+# Celery Worker Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    postgresql-client \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY apps/api/requirements.txt /app/api/requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r /app/api/requirements.txt
+
+# Copy application code
+COPY apps/api /app/api
+COPY packages/design-schema /app/design-schema
+
+WORKDIR /app/api
+
+# Run Celery worker
+CMD ["celery", "-A", "config", "worker", "-l", "info"]
