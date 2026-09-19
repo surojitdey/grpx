@@ -88,6 +88,54 @@ export function createDefaultCircle(x = 0, y = 0): DesignObject {
     };
 }
 
+export function createDefaultImage(x = 0, y = 0, url = ''): DesignObject {
+    return {
+        id: generateObjectId(),
+        type: 'image',
+        x,
+        y,
+        width: 300,
+        height: 200,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        opacity: 1,
+        visible: true,
+        locked: false,
+        zIndex: 0,
+        content: {
+            assetId: url,
+        },
+        crop: {
+            x: 0,
+            y: 0,
+            width: 300,
+            height: 200,
+        },
+    } as any;
+}
+
+export function createDefaultLine(x = 0, y = 0): DesignObject {
+    return {
+        id: generateObjectId(),
+        type: 'line',
+        x,
+        y,
+        width: 300,
+        height: 2,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        opacity: 1,
+        visible: true,
+        locked: false,
+        zIndex: 0,
+        fill: undefined,
+        stroke: '#000000',
+        strokeWidth: 2,
+    } as any;
+}
+
 export function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
 }
@@ -95,16 +143,27 @@ export function clamp(value: number, min: number, max: number): number {
 export function debounce<T extends (...args: any[]) => any>(
     func: T,
     wait: number
-): (...args: Parameters<T>) => void {
-    let timeout: NodeJS.Timeout;
-    return function executedFunction(...args: Parameters<T>) {
+): ((...args: Parameters<T>) => void) & { cancel: () => void } {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const debounced = function executedFunction(...args: Parameters<T>) {
         const later = () => {
-            clearTimeout(timeout);
+            timeout = null;
             func(...args);
         };
-        clearTimeout(timeout);
+        if (timeout !== null) {
+            clearTimeout(timeout as any);
+        }
         timeout = setTimeout(later, wait);
+    } as ((...args: Parameters<T>) => void) & { cancel: () => void };
+
+    debounced.cancel = () => {
+        if (timeout !== null) {
+            clearTimeout(timeout as any);
+            timeout = null;
+        }
     };
+
+    return debounced;
 }
 
 export function throttle<T extends (...args: any[]) => any>(

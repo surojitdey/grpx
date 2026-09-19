@@ -5,17 +5,56 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1
 
 const client = axios.create({
     baseURL: API_URL,
-    headers: {
-        'Content-Type': 'application/json',
-    },
+    // Don't set default Content-Type - let axios handle it per request
+    // FormData needs to set multipart/form-data with boundary automatically
+    headers: {},
 });
+
+// Convert snake_case keys to camelCase
+function snakeToCamel(str: string): string {
+    return str.replace(/_([a-z])/g, (g) => g[1].toUpperCase());
+}
+
+function transformKeys(obj: any): any {
+    if (Array.isArray(obj)) {
+        return obj.map(transformKeys);
+    }
+    if (obj !== null && typeof obj === 'object') {
+        return Object.keys(obj).reduce((result: any, key: string) => {
+            const camelKey = snakeToCamel(key);
+            result[camelKey] = transformKeys(obj[key]);
+            return result;
+        }, {});
+    }
+    return obj;
+}
 
 // Add token to requests
 client.interceptors.request.use((config) => {
-    const token = localStorage.getItem('access_token');
-    if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
+    // Allow callers to skip attaching the Authorization header by setting
+    // a custom `x-skip-auth` header on the request config. This is useful
+    // for login/register endpoints where an expired token in localStorage
+    // should not be sent.
+    const skip = config.headers && (config.headers as any)['x-skip-auth'];
+    if (skip) {
+        // remove the helper header before sending
+        delete (config.headers as any)['x-skip-auth'];
     }
+
+    // Set Content-Type for JSON requests (but not for FormData)
+    if (!(config.data instanceof FormData) && !config.headers['Content-Type']) {
+        config.headers['Content-Type'] = 'application/json';
+    }
+
+    // Only attach Authorization header when caller did NOT request skip
+    if (!skip) {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+        if (token) {
+            config.headers = config.headers || {};
+            (config.headers as any).Authorization = `Bearer ${token}`;
+        }
+    }
+
     return config;
 });
 
@@ -33,11 +72,11 @@ export const authApi = {
             username: email.split('@')[0], // Use email prefix as username
             first_name: firstName,
             last_name: lastName,
-        });
+        }, { headers: { 'x-skip-auth': '1' } });
     },
 
     login: (email: string, password: string) =>
-        client.post('/auth/login/', { email, password }),
+        client.post('/auth/login/', { email, password }, { headers: { 'x-skip-auth': '1' } }),
 
     logout: () => client.post('/auth/logout/', {}),
 
@@ -48,20 +87,32 @@ export const authApi = {
 
 // Design API
 export const designApi = {
-    getDesigns: () => client.get<Design[]>('/designs/'),
+    getDesigns: async () => {
+        const response = await client.get<Design[]>('/designs/');
+        return { ...response, data: transformKeys(response.data) };
+    },
 
-    getDesign: (id: string) => client.get<Design>(`/designs/${id}/`),
+    getDesign: async (id: string) => {
+        const response = await client.get<Design>(`/designs/${id}/`);
+        return { ...response, data: transformKeys(response.data) };
+    },
 
-    createDesign: (data: Partial<Design>) =>
-        client.post<Design>('/designs/', data),
+    createDesign: async (data: Partial<Design>) => {
+        const response = await client.post<Design>('/designs/', data);
+        return { ...response, data: transformKeys(response.data) };
+    },
 
-    updateDesign: (id: string, data: Partial<Design>) =>
-        client.patch<Design>(`/designs/${id}/`, data),
+    updateDesign: async (id: string, data: Partial<Design>) => {
+        const response = await client.patch<Design>(`/designs/${id}/`, data);
+        return { ...response, data: transformKeys(response.data) };
+    },
 
     deleteDesign: (id: string) => client.delete(`/designs/${id}/`),
 
-    duplicateDesign: (id: string) =>
-        client.post<Design>(`/designs/${id}/duplicate/`, {}),
+    duplicateDesign: async (id: string) => {
+        const response = await client.post<Design>(`/designs/${id}/duplicate/`, {});
+        return { ...response, data: transformKeys(response.data) };
+    },
 };
 
 // Pages API
@@ -86,6 +137,19 @@ export const assetApi = {
     getAsset: (id: string) => client.get<Asset>(`/assets/${id}/`),
 
     deleteAsset: (id: string) => client.delete(`/assets/${id}/`),
+
+    directUpload: async (file: File, name?: string) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        if (name) {
+            formData.append('name', name);
+        }
+
+        // Don't override Content-Type - let axios set it with proper boundary
+        // The request interceptor will add Authorization header automatically
+        const response = await client.post<Asset>('/assets/direct-upload/', formData);
+        return { ...response, data: transformKeys(response.data) };
+    },
 
     getUploadUrl: (filename: string, contentType: string) =>
         client.post('/assets/upload-url/', { filename, contentType }),

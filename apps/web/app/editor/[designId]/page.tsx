@@ -8,11 +8,12 @@ export const metadata: Metadata = {
 };
 
 interface EditorPageProps {
-    params: {
+    params: Promise<{
         designId: string;
-    };
+    }>;
 }
 
-export default function EditorPage({ params }: EditorPageProps) {
-    return <EditorLayout designId={params.designId} />;
+export default async function EditorPage({ params }: EditorPageProps) {
+    const { designId } = await params;
+    return <EditorLayout designId={designId} />;
 }

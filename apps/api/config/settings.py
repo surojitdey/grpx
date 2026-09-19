@@ -148,8 +148,9 @@ CORS_ALLOW_CREDENTIALS = True
 
 # JWT Configuration
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(seconds=env('JWT_ACCESS_TOKEN_LIFETIME', default=3600)),
-    'REFRESH_TOKEN_LIFETIME': timedelta(seconds=env('JWT_REFRESH_TOKEN_LIFETIME', default=604800)),
+    # Ensure environment values are parsed as integers
+    'ACCESS_TOKEN_LIFETIME': timedelta(seconds=env.int('JWT_ACCESS_TOKEN_LIFETIME', default=3600)),
+    'REFRESH_TOKEN_LIFETIME': timedelta(seconds=env.int('JWT_REFRESH_TOKEN_LIFETIME', default=604800)),
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
 }
@@ -236,8 +237,8 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '1.0.0',
     'SERVE_AUTHENTICATION': ['rest_framework_simplejwt.authentication.JWTAuthentication'],
     'SERVERS': [
-        {'url': '/api/v1', 'description': 'Production'},
-        {'url': 'http://localhost:8000/api/v1', 'description': 'Local'},
+        {'url': '', 'description': 'Production'},
+        {'url': 'http://localhost:8000', 'description': 'Local'},
     ],
 }
 
