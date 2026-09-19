@@ -4,6 +4,8 @@ URL configuration for design_platform API
 
 from django.contrib import admin
 from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from apps.users.views import UserViewSet
@@ -36,3 +38,7 @@ urlpatterns = [
     path('api/v1/exports/', include('apps.exports.urls')),
     path('api/v1/shared/', include('apps.sharing.urls')),
 ]
+
+# Serve media files in development
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

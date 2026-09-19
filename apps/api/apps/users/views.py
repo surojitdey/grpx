@@ -36,7 +36,7 @@ class UserViewSet(viewsets.ModelViewSet):
             return [AllowAny()]
         return super().get_permissions()
     
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny()])
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny()], authentication_classes=[])
     def register(self, request):
         """
         Register a new user
@@ -67,7 +67,7 @@ class UserViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED
         )
     
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny()])
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny()], authentication_classes=[])
     def login(self, request):
         """
         Login user and return JWT tokens

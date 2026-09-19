@@ -5,6 +5,8 @@ Asset views
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
+from django.core.files.storage import default_storage
 from .models import Asset
 from .serializers import (
     AssetSerializer,
@@ -22,6 +24,7 @@ class AssetViewSet(viewsets.ModelViewSet):
     
     serializer_class = AssetSerializer
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser)
     
     def get_queryset(self):
         """Only show assets owned by the current user"""
@@ -30,6 +33,54 @@ class AssetViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Ensure owner is set to current user"""
         serializer.save(owner=self.request.user)
+    
+    @action(detail=False, methods=['post'])
+    def direct_upload(self, request):
+        """
+        Direct file upload endpoint
+        
+        POST /api/v1/assets/direct-upload/
+        
+        Form data:
+        - file: Image file
+        - name: Optional asset name
+        """
+        if 'file' not in request.FILES:
+            return Response(
+                {'detail': 'No file provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        file = request.FILES['file']
+        name = request.POST.get('name', file.name)
+        
+        try:
+            # Save file using Django's storage system
+            file_path = f'assets/{request.user.id}/{file.name}'
+            url = default_storage.save(file_path, file)
+            relative_url = default_storage.url(url)
+            
+            # Build absolute URL for frontend access
+            full_url = request.build_absolute_uri(relative_url)
+            
+            # Create asset record
+            asset = Asset.objects.create(
+                owner=request.user,
+                name=name,
+                asset_type='image',
+                storage_key=file_path,
+                url=full_url,
+                mime_type=file.content_type,
+                file_size=file.size,
+            )
+            
+            serializer = AssetSerializer(asset)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response(
+                {'detail': f'Upload failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=False, methods=['post'])
     def upload_url(self, request):
