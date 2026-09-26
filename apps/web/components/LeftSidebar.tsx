@@ -1,7 +1,10 @@
 'use client';
 
 import { useEditorStore } from '@/stores/editor';
+import { assetApi } from '@/services/api';
+import { createDefaultImage } from '@/utils/editor';
 import cn from 'classnames';
+import { useState } from 'react';
 import {
     SparklesIcon,
     Squares2X2Icon,
@@ -62,7 +65,10 @@ export default function LeftSidebar() {
         activeTool,
         setActiveTool,
         leftSidebarOpen,
+        addObject,
     } = useEditorStore();
+
+    const [uploading, setUploading] = useState(false);
 
     if (!leftSidebarOpen) return null;
 
@@ -186,12 +192,41 @@ export default function LeftSidebar() {
                                 accept="image/*"
                                 className="hidden"
                                 id="image-upload"
+                                disabled={uploading}
+                                onChange={async (e) => {
+                                    const file = e.target.files?.[0];
+                                    if (!file) return;
+
+                                    try {
+                                        setUploading(true);
+                                        // Upload to backend
+                                        const response = await assetApi.directUpload(file, file.name);
+                                        const url = response.data.url;
+
+                                        const rect = (document.querySelector('.canvas-wrapper canvas') as HTMLCanvasElement)?.getBoundingClientRect();
+                                        const x = rect ? Math.max(20, rect.width / 2 - 150) : 100;
+                                        const y = rect ? Math.max(20, rect.height / 2 - 100) : 100;
+                                        const imgObj = createDefaultImage(x, y, url);
+                                        addObject(imgObj);
+                                        setActiveTool('select');
+                                    } catch (err) {
+                                        console.error('Image upload failed:', err);
+                                        alert('Failed to upload image');
+                                    } finally {
+                                        setUploading(false);
+                                    }
+                                }}
                             />
                             <label
                                 htmlFor="image-upload"
-                                className="cursor-pointer text-sm text-gray-600 hover:text-gray-900"
+                                className={cn(
+                                    'cursor-pointer text-sm',
+                                    uploading
+                                        ? 'text-gray-400 cursor-not-allowed'
+                                        : 'text-gray-600 hover:text-gray-900'
+                                )}
                             >
-                                Drag and drop or click to select
+                                {uploading ? 'Uploading...' : 'Drag and drop or click to select'}
                             </label>
                         </div>
                     </div>
