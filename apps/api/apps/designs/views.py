@@ -2,21 +2,19 @@
 Design views and viewsets
 """
 
+from django.utils import timezone
 from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.filters import SearchFilter, OrderingFilter
 
-from .models import Design, DesignPage, DesignVersion
+from .documents import clone_document
+from .models import Design
 from .serializers import (
     DesignListSerializer,
     DesignDetailSerializer,
     DesignCreateSerializer,
     DesignUpdateSerializer,
-    DesignPageSerializer,
-    DesignVersionSerializer
+    DesignVersionSerializer,
 )
 from .permissions import IsDesignOwner
 
@@ -24,22 +22,24 @@ from .permissions import IsDesignOwner
 class DesignViewSet(viewsets.ModelViewSet):
     """
     Design management endpoints
-    
-    List, create, retrieve, update, and delete designs
+
+    List, create, retrieve, update, duplicate, soft-delete, and restore designs
     """
-    
+
     serializer_class = DesignDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['status']
+    filterset_fields = ['status', 'is_template']
     search_fields = ['name', 'description']
     ordering_fields = ['created_at', 'updated_at', 'name']
     ordering = ['-updated_at']
-    
+
     def get_queryset(self):
-        """Only show designs owned by the current user"""
-        return Design.objects.filter(owner=self.request.user)
-    
+        """Only designs owned by the current user; soft-deleted ones are hidden except when restoring"""
+        queryset = Design.objects.filter(owner=self.request.user)
+        if self.action != 'restore':
+            queryset = queryset.filter(is_deleted=False)
+        return queryset
+
     def get_serializer_class(self):
         """Use different serializers for different actions"""
         if self.action == 'list':
@@ -49,153 +49,90 @@ class DesignViewSet(viewsets.ModelViewSet):
         elif self.action in ['update', 'partial_update']:
             return DesignUpdateSerializer
         return DesignDetailSerializer
-    
+
     def create(self, request, *args, **kwargs):
-        """Create a new design"""
+        """Create a new design with a default background and one page"""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        
-        # Return full design detail
+
         design = serializer.instance
         return Response(
             DesignDetailSerializer(design).data,
             status=status.HTTP_201_CREATED
         )
-    
+
     def perform_create(self, serializer):
         """Ensure owner is set to current user"""
         serializer.save(owner=self.request.user)
-    
+
+    def retrieve(self, request, *args, **kwargs):
+        """Return the canonical document and revision metadata, tracking last opened time"""
+        design = self.get_object()
+        design.last_opened_at = timezone.now()
+        design.save(update_fields=['last_opened_at'])
+        return Response(self.get_serializer(design).data)
+
+    def partial_update(self, request, *args, **kwargs):
+        """Update metadata only; the document is never touched here"""
+        design = self.get_object()
+        serializer = self.get_serializer(design, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(DesignDetailSerializer(design).data)
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft delete a design instead of removing it immediately"""
+        design = self.get_object()
+        design.is_deleted = True
+        design.save(update_fields=['is_deleted', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated, IsDesignOwner])
     def duplicate(self, request, pk=None):
         """
         Duplicate a design
-        
+
         POST /api/v1/designs/{id}/duplicate/
         """
         design = self.get_object()
-        
-        # Create new design
+
         new_design = Design.objects.create(
             owner=request.user,
             name=f"{design.name} (Copy)",
             description=design.description,
             width=design.width,
             height=design.height,
-            status='draft'
+            status='draft',
+            document=clone_document(design.document),
+            schema_version=design.schema_version,
         )
-        
-        # Duplicate pages
-        for page in design.pages.all():
-            DesignPage.objects.create(
-                design=new_design,
-                page_number=page.page_number,
-                name=page.name,
-                document=page.document
-            )
-        
+
         return Response(
             DesignDetailSerializer(new_design).data,
             status=status.HTTP_201_CREATED
         )
-    
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated, IsDesignOwner])
+    def restore(self, request, pk=None):
+        """
+        Restore a soft-deleted design
+
+        POST /api/v1/designs/{id}/restore/
+        """
+        design = self.get_object()
+        design.is_deleted = False
+        design.save(update_fields=['is_deleted', 'updated_at'])
+        return Response(DesignDetailSerializer(design).data)
+
     @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated, IsDesignOwner])
     def versions(self, request, pk=None):
         """
         Get design version history
-        
+
         GET /api/v1/designs/{id}/versions/
         """
         design = self.get_object()
         versions = design.versions.all()
         serializer = DesignVersionSerializer(versions, many=True)
         return Response(serializer.data)
-
-
-class DesignPageViewSet(viewsets.ModelViewSet):
-    """
-    Design page management
-    
-    Manage individual pages within a design
-    """
-    
-    serializer_class = DesignPageSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    
-    def get_queryset(self):
-        """Get pages for designs owned by the current user"""
-        design_id = self.kwargs.get('design_id')
-        design = get_object_or_404(Design, id=design_id, owner=self.request.user)
-        return design.pages.all()
-    
-    def get_design(self):
-        """Get the parent design"""
-        design_id = self.kwargs.get('design_id')
-        return get_object_or_404(Design, id=design_id, owner=self.request.user)
-    
-    def create(self, request, *args, **kwargs):
-        """Add a new page to a design"""
-        design = self.get_design()
-        
-        # Calculate next page number
-        last_page = design.pages.order_by('-page_number').first()
-        next_page_number = (last_page.page_number + 1) if last_page else 1
-        
-        page = DesignPage.objects.create(
-            design=design,
-            page_number=next_page_number,
-            name=f'Page {next_page_number}',
-            document={
-                'objects': [],
-                'background': {
-                    'type': 'color',
-                    'value': '#FFFFFF'
-                }
-            }
-        )
-        
-        return Response(
-            DesignPageSerializer(page).data,
-            status=status.HTTP_201_CREATED
-        )
-    
-    def update(self, request, *args, **kwargs):
-        """Update a page (especially the document)"""
-        page = self.get_object()
-        
-        # Increment version if document changed
-        if 'document' in request.data and request.data['document'] != page.document:
-            page.version += 1
-        
-        serializer = self.get_serializer(page, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        
-        return Response(serializer.data)
-    
-    @action(detail=True, methods=['post'])
-    def duplicate(self, request, design_id=None, pk=None):
-        """
-        Duplicate a page
-        
-        POST /api/v1/designs/{design_id}/pages/{id}/duplicate/
-        """
-        design = self.get_design()
-        page = self.get_object()
-        
-        # Calculate next page number
-        last_page = design.pages.order_by('-page_number').first()
-        next_page_number = last_page.page_number + 1
-        
-        new_page = DesignPage.objects.create(
-            design=design,
-            page_number=next_page_number,
-            name=f"{page.name} (Copy)",
-            document=page.document
-        )
-        
-        return Response(
-            DesignPageSerializer(new_page).data,
-            status=status.HTTP_201_CREATED
-        )

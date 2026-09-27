@@ -29,6 +29,43 @@ function transformKeys(obj: any): any {
     return obj;
 }
 
+// Convert a canonical page ({id, name, objects}) into the editor page shape
+// ({id, name, document: {objects, background, ...}}). The server stores objects
+// directly on each page; the editor reads them from page.document.objects.
+// Pages without their own background inherit the design-level one.
+// Returns null for non-object input so callers can filter safely.
+function canonicalPageToEditorPage(page: any, designBackground: any): any | null {
+    if (!page || typeof page !== 'object') return null;
+    if (page.document && Array.isArray(page.document.objects)) return page;
+    return {
+        ...page,
+        document: {
+            schemaVersion: '1.0',
+            objects: Array.isArray(page.objects) ? page.objects : [],
+            background:
+                page.background || designBackground || { type: 'color', value: '#FFFFFF' },
+            ...(page.document || {}),
+        },
+    };
+}
+
+// Normalize a server Design object into the client `Design` shape expected
+// by the editor UI: move `document.pages` to top-level `pages` (converting
+// canonical pages into editor pages so page.objects land in
+// page.document.objects) and keep other top-level metadata.
+// `transformKeys` should be run first. Exported for reuse when restoring
+// locally-cached designs that may be in the older server shape.
+export function normalizeDesign(obj: any): any {
+    if (!obj) return obj;
+    const out = { ...obj };
+    if (out.document && Array.isArray(out.document.pages)) {
+        out.pages = out.document.pages
+            .map((page: any) => canonicalPageToEditorPage(page, out.document.background))
+            .filter(Boolean);
+    }
+    return out;
+}
+
 // Add token to requests
 client.interceptors.request.use((config) => {
     // Allow callers to skip attaching the Authorization header by setting
@@ -94,24 +131,28 @@ export const designApi = {
 
     getDesign: async (id: string) => {
         const response = await client.get<Design>(`/designs/${id}/`);
-        return { ...response, data: transformKeys(response.data) };
+        const data = transformKeys(response.data);
+        return { ...response, data: normalizeDesign(data) };
     },
 
     createDesign: async (data: Partial<Design>) => {
         const response = await client.post<Design>('/designs/', data);
-        return { ...response, data: transformKeys(response.data) };
+        const d = transformKeys(response.data);
+        return { ...response, data: normalizeDesign(d) };
     },
 
     updateDesign: async (id: string, data: Partial<Design>) => {
         const response = await client.patch<Design>(`/designs/${id}/`, data);
-        return { ...response, data: transformKeys(response.data) };
+        const d = transformKeys(response.data);
+        return { ...response, data: normalizeDesign(d) };
     },
 
     deleteDesign: (id: string) => client.delete(`/designs/${id}/`),
 
     duplicateDesign: async (id: string) => {
         const response = await client.post<Design>(`/designs/${id}/duplicate/`, {});
-        return { ...response, data: transformKeys(response.data) };
+        const d = transformKeys(response.data);
+        return { ...response, data: normalizeDesign(d) };
     },
 };
 
@@ -148,7 +189,8 @@ export const assetApi = {
         // Don't override Content-Type - let axios set it with proper boundary
         // The request interceptor will add Authorization header automatically
         const response = await client.post<Asset>('/assets/direct-upload/', formData);
-        return { ...response, data: transformKeys(response.data) };
+        const data = transformKeys(response.data);
+        return { ...response, data };
     },
 
     getUploadUrl: (filename: string, contentType: string) =>
@@ -166,7 +208,7 @@ export const templateApi = {
     getTemplate: (id: string) => client.get<Template>(`/templates/${id}/`),
 
     createDesignFromTemplate: (templateId: string) =>
-        client.post<Design>('/designs/from-template/', { templateId }),
+        client.post<Design>('/designs/from-template/', { templateId }).then((r) => ({ ...r, data: normalizeDesign(transformKeys(r.data)) })),
 };
 
 // Export API

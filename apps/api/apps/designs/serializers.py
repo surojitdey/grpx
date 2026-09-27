@@ -3,73 +3,61 @@ Design serializers
 """
 
 from rest_framework import serializers
-from .models import Design, DesignPage, DesignVersion
 
-
-class DesignPageSerializer(serializers.ModelSerializer):
-    """Serializer for design pages"""
-    
-    class Meta:
-        model = DesignPage
-        fields = ['id', 'page_number', 'name', 'document', 'version', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'version', 'created_at', 'updated_at']
+from .documents import build_default_document
+from .models import Design, DesignVersion
 
 
 class DesignListSerializer(serializers.ModelSerializer):
-    """Serializer for design list view"""
-    
+    """Lightweight serializer for the design list view (no document payload)"""
+
     class Meta:
         model = Design
-        fields = ['id', 'name', 'description', 'width', 'height', 'status', 'current_version', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'current_version', 'created_at', 'updated_at']
+        fields = [
+            'id', 'name', 'description', 'width', 'height', 'status',
+            'is_template', 'schema_version', 'revision', 'thumbnail_key',
+            'created_at', 'updated_at', 'last_opened_at',
+        ]
+        read_only_fields = fields
 
 
 class DesignDetailSerializer(serializers.ModelSerializer):
-    """Serializer for design detail view with pages"""
-    
-    pages = DesignPageSerializer(many=True, read_only=True)
-    
+    """Serializer for the design detail view - returns the canonical document and revision metadata"""
+
     class Meta:
         model = Design
-        fields = ['id', 'name', 'description', 'width', 'height', 'status', 'current_version', 'pages', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'current_version', 'pages', 'created_at', 'updated_at']
+        fields = [
+            'id', 'name', 'description', 'width', 'height', 'status',
+            'is_template', 'document', 'schema_version', 'revision',
+            'thumbnail_key', 'created_at', 'updated_at', 'last_opened_at',
+        ]
+        read_only_fields = [
+            'id', 'document', 'schema_version', 'revision', 'thumbnail_key',
+            'created_at', 'updated_at', 'last_opened_at',
+        ]
 
 
 class DesignCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating designs"""
-    
+
     class Meta:
         model = Design
-        fields = ['name', 'description', 'width', 'height', 'status']
-    
+        fields = ['name', 'description', 'width', 'height', 'status', 'is_template']
+
     def create(self, validated_data):
-        """Create a design with an initial page"""
-        # Owner is set in perform_create, so just use validated_data
-        design = Design.objects.create(**validated_data)
-        
-        # Create initial page
-        DesignPage.objects.create(
-            design=design,
-            page_number=1,
-            name='Page 1',
-            document={
-                'objects': [],
-                'background': {
-                    'type': 'color',
-                    'value': '#FFFFFF'
-                }
-            }
-        )
-        
-        return design
+        """Create a design with a default background and one blank page"""
+        width = validated_data.get('width', 1080)
+        height = validated_data.get('height', 1080)
+        validated_data['document'] = build_default_document(width, height)
+        return Design.objects.create(**validated_data)
 
 
 class DesignUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating designs"""
-    
+    """Serializer for metadata-only updates (PATCH); `document` is deliberately excluded"""
+
     class Meta:
         model = Design
-        fields = ['name', 'description', 'status']
+        fields = ['name', 'description', 'width', 'height', 'status', 'is_template']
 
 
 class DesignVersionSerializer(serializers.ModelSerializer):

@@ -10,7 +10,8 @@ from rest_framework.filters import SearchFilter
 
 from .models import Template
 from .serializers import TemplateSerializer, TemplateListSerializer
-from apps.designs.models import Design, DesignPage
+from apps.designs.documents import SCHEMA_VERSION, clone_document
+from apps.designs.models import Design
 
 
 class TemplateViewSet(viewsets.ModelViewSet):
@@ -44,24 +45,20 @@ class TemplateViewSet(viewsets.ModelViewSet):
         """
         template = self.get_object()
         name = request.data.get('name', template.name)
-        
-        # Create new design
+
+        # Clone the template's canonical document so page/object IDs don't collide
+        document = clone_document(template.document)
+
         design = Design.objects.create(
             owner=request.user,
             name=name,
-            width=template.document.get('width', 1080),
-            height=template.document.get('height', 1080),
-            status='draft'
+            width=document.get('width', 1080),
+            height=document.get('height', 1080),
+            status='draft',
+            document=document,
+            schema_version=document.get('schemaVersion', SCHEMA_VERSION),
         )
-        
-        # Create page from template
-        DesignPage.objects.create(
-            design=design,
-            page_number=1,
-            name='Page 1',
-            document=template.document
-        )
-        
+
         return Response(
             {'id': design.id, 'name': design.name},
             status=status.HTTP_201_CREATED
