@@ -72,6 +72,77 @@ export function normalizeDesign(obj: any): any {
     return out;
 }
 
+// Rebuild the canonical server document from the editor's design shape —
+// the inverse of normalizeDesign. The editor keeps objects at
+// `page.document.objects`; the canonical schema stores them at
+// `page.objects` with the design-level background on the envelope.
+// Per-page backgrounds are only included when they differ from the envelope
+// background, so a background inherited from the design is not baked into
+// every page on save.
+export function buildCanonicalDocument(design: any): any {
+    const pages = Array.isArray(design?.pages) ? design.pages.filter(Boolean) : [];
+    const background =
+        design?.document?.background ||
+        pages.find((page: any) => page?.document?.background)?.document.background ||
+        { type: 'color', value: '#FFFFFF' };
+
+    return {
+        schemaVersion: design?.document?.schemaVersion || '1.0',
+        width: design?.width ?? design?.document?.width,
+        height: design?.height ?? design?.document?.height,
+        background,
+        pages: pages.map((page: any) => {
+            const pageBackground = page.document?.background ?? page.background;
+            const inheritsEnvelopeBackground =
+                pageBackground && JSON.stringify(pageBackground) === JSON.stringify(background);
+            return {
+                id: page.id,
+                ...(typeof page.name === 'string' ? { name: page.name } : {}),
+                ...(pageBackground && !inheritsEnvelopeBackground ? { background: pageBackground } : {}),
+                objects: Array.isArray(page.document?.objects)
+                    ? page.document.objects
+                    : Array.isArray(page.objects)
+                      ? page.objects
+                      : [],
+            };
+        }),
+    };
+}
+
+// Decide how a freshly fetched server design relates to the locally-cached
+// one, without ever discarding unsynced local edits on a guess:
+//   'adopt'  – server is strictly newer (higher revision); replace the cache
+//   'resync' – same revision but different content: the cache carries
+//              unsynced local edits that must be preserved and pushed
+//   'keep'   – cache is at least as new; leave the editor state untouched
+export function reconcileServerDesign(server: any, cached: any): 'adopt' | 'resync' | 'keep' {
+    const serverRevision = server?.revision;
+    const cachedRevision = cached?.revision;
+
+    if (serverRevision != null && cachedRevision != null) {
+        if (serverRevision > cachedRevision) return 'adopt';
+        if (serverRevision < cachedRevision) return 'keep';
+        // Equal revisions: the cache sits at the same save point, so any
+        // content difference is an unsynced local edit.
+        return (
+            JSON.stringify(buildCanonicalDocument(server)) ===
+            JSON.stringify(buildCanonicalDocument(cached))
+                ? 'keep'
+                : 'resync'
+        );
+    }
+
+    // No comparable revisions (e.g. a cache written before revisions were
+    // tracked): fall back to updatedAt, and prefer the cache whenever the
+    // comparison is inconclusive.
+    const serverUpdated = server?.updatedAt ? new Date(server.updatedAt).getTime() : null;
+    const cachedUpdated = cached?.updatedAt ? new Date(cached.updatedAt).getTime() : null;
+    if (serverUpdated != null && cachedUpdated != null && serverUpdated > cachedUpdated) {
+        return 'adopt';
+    }
+    return 'keep';
+}
+
 // Add token to requests
 client.interceptors.request.use((config) => {
     // Allow callers to skip attaching the Authorization header by setting
@@ -151,6 +222,15 @@ export const designApi = {
         const response = await client.patch<Design>(`/designs/${id}/`, data);
         const d = transformKeys(response.data);
         return { ...response, data: normalizeDesign(d) };
+    },
+
+    // Replace the canonical document (PUT /designs/{id}/document/) with
+    // optimistic-concurrency protection. `revision` must be the client's last
+    // known revision; the server replies 409 if it has advanced since.
+    // Resolves with { id, revision, schemaVersion, updatedAt } on success.
+    saveDocument: async (id: string, document: any, revision: number) => {
+        const response = await client.put(`/designs/${id}/document/`, { document, revision });
+        return { ...response, data: transformKeys(response.data) };
     },
 
     deleteDesign: (id: string) => client.delete(`/designs/${id}/`),

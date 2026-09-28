@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { Design, DesignPage, DesignObject, User } from '@/types';
+import { Design, DesignPage, DesignObject, User, PersistenceState } from '@/types';
+import { buildCanonicalDocument } from '@/services/api';
 
 interface EditorState {
     // Design state
@@ -31,6 +32,9 @@ interface EditorState {
     // Text editing state
     editingTextId: string | null;
     editingTextValue: string;
+
+    // Autosave persistence state (see PersistenceState in types/index.ts).
+    persistence: PersistenceState;
 
     // Actions
     setDesign: (design: Design) => void;
@@ -68,9 +72,26 @@ interface EditorState {
     // Undo/Redo actions
     undo: () => void;
     redo: () => void;
+
+    // Persistence actions
+    markDirty: () => void;
+    markClean: () => void;
+    saveStarted: () => void;
+    saveSuccess: (revision: number, savedAt: Date) => void;
+    saveSuccessIfCurrent: (revision: number, savedAt: Date, serialized: string) => void;
+    saveFailed: (message: string) => void;
+    resetPersistence: (revision: number) => void;
 }
 
 const MAX_HISTORY = 50;
+
+const INITIAL_PERSISTENCE: PersistenceState = {
+    isDirty: false,
+    isSaving: false,
+    lastSavedAt: null,
+    saveError: null,
+    revision: 0,
+};
 
 const addToHistory = (state: any, newDesign: Design) => {
     // Remove any redo history beyond current index
@@ -133,6 +154,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     historyIndex: -1,
     editingTextId: null,
     editingTextValue: '',
+    persistence: { ...INITIAL_PERSISTENCE },
 
     setDesign: (design) =>
         set({
@@ -148,6 +170,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                 pages: (design.pages || []).map(ensurePageDocument),
             }))] : [],
             historyIndex: design ? 0 : -1,
+            // Loading a design is not an edit: reset persistence so the
+            // autosave flow starts clean (EditorLayout re-baselines from the
+            // loaded revision and syncs save outcomes back via saveSuccess).
+            persistence: { ...INITIAL_PERSISTENCE },
         }),
 
     setCurrentPage: (pageId) => set({ currentPageId: pageId }),
@@ -205,7 +231,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                     return p;
                 }),
             };
-            return addToHistory(state, newDesign);
+            return {
+                ...addToHistory(state, newDesign),
+                persistence: { ...state.persistence, isDirty: true, saveError: null },
+            };
         }),
 
     removeObject: (id) =>
@@ -230,6 +259,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             return {
                 ...addToHistory(state, newDesign),
                 selectedObjectIds: state.selectedObjectIds.filter((sid) => sid !== id),
+                persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }),
 
@@ -254,7 +284,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                     return p;
                 }),
             } as any;
-            return addToHistory(state, newDesign);
+            return {
+                ...addToHistory(state, newDesign),
+                persistence: { ...state.persistence, isDirty: true, saveError: null },
+            };
         }) as any,
 
     reorderObject: (id, direction) =>
@@ -296,6 +329,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                             : p
                     ),
                 },
+                persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }),
 
@@ -338,6 +372,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             return {
                 ...addToHistory(state, newDesign),
                 selectedObjectIds: [duplicated.id],
+                persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }),
 
@@ -348,6 +383,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             return {
                 design: JSON.parse(JSON.stringify(state.history[newIndex])),
                 historyIndex: newIndex,
+                // Undo/redo change the document just as much as direct edits;
+                // the autosave effect dedupes against the last synced payload.
+                persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }),
 
@@ -358,6 +396,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             return {
                 design: JSON.parse(JSON.stringify(state.history[newIndex])),
                 historyIndex: newIndex,
+                persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }),
 
@@ -369,4 +408,87 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     stopEditingText: () =>
         set({ editingTextId: null, editingTextValue: '' }),
+
+    markDirty: () =>
+        set((state) => ({
+            persistence: { ...state.persistence, isDirty: true, saveError: null },
+        })),
+
+    // Content is back in sync with the server (e.g. undo returned to the last
+    // synced state) without a save acknowledging new edits.
+    markClean: () =>
+        set((state) => ({
+            persistence: { ...state.persistence, isDirty: false, saveError: null },
+        })),
+
+    saveStarted: () =>
+        set((state) => ({
+            persistence: { ...state.persistence, isSaving: true, saveError: null },
+        })),
+
+    saveSuccess: (revision, savedAt) =>
+        set((state) => ({
+            persistence: {
+                ...state.persistence,
+                isDirty: false,
+                isSaving: false,
+                lastSavedAt: savedAt,
+                saveError: null,
+                revision,
+            },
+        })),
+
+    // Only clears dirty state when the response corresponds to the current
+    // in-memory document. A successful save that returned a stale payload
+    // (e.g. because newer local edits arrived) must not be allowed to
+    // temporarily mark the newer edits clean.
+    saveSuccessIfCurrent: (revision: number, savedAt: Date, serialized: string) =>
+        set((state) => {
+            const currentDesign = state.design;
+            if (!currentDesign) return { persistence: state.persistence };
+            const currentSerialization = JSON.stringify(buildCanonicalDocument(currentDesign));
+            if (currentSerialization !== serialized) {
+                // Response is stale: do not clear dirty state, but do absorb
+                // fresh metadata so the next local save starts from a newer
+                // revision baseline.
+                return {
+                    persistence: {
+                        ...state.persistence,
+                        isSaving: false,
+                        lastSavedAt: savedAt,
+                        revision,
+                        saveError: state.persistence.saveError ?? null,
+                    },
+                };
+            }
+            return {
+                persistence: {
+                    ...state.persistence,
+                    isDirty: false,
+                    isSaving: false,
+                    lastSavedAt: savedAt,
+                    saveError: null,
+                    revision,
+                },
+            };
+        }),
+
+    saveFailed: (message) =>
+        set((state) => ({
+            persistence: {
+                ...state.persistence,
+                isSaving: false,
+                // Stays dirty: the edits only leave this state once a save
+                // succeeds (or the design is reloaded).
+                isDirty: true,
+                saveError: message,
+            },
+        })),
+
+    resetPersistence: (revision) =>
+        set(() => ({
+            // Full reset (including lastSavedAt): used on load/design switch
+            // where the previous design's save history must not leak through.
+            persistence: { ...INITIAL_PERSISTENCE, revision },
+        })),
 }));

@@ -80,9 +80,40 @@ export interface Design {
     height: number;
     status: 'draft' | 'published' | 'archived';
     currentVersion: number;
+    // Server-side canonical state: `revision` is used for optimistic
+    // concurrency on document saves, `document` holds the canonical snapshot
+    // as returned by the API (never rewritten by local edits).
+    revision?: number;
+    document?: {
+        schemaVersion?: string;
+        width?: number;
+        height?: number;
+        background?: { type: string; value: string };
+        pages?: Array<{
+            id: string;
+            name?: string;
+            background?: { type: string; value: string };
+            objects?: DesignObject[];
+        }>;
+    };
     pages: DesignPage[];
     createdAt: string;
     updatedAt: string;
+}
+
+// Persistence state for the editor autosave flow:
+// edits → isDirty → debounced serialize → validate → PUT /document → saved.
+export interface PersistenceState {
+    // Local edits not yet acknowledged by the server.
+    isDirty: boolean;
+    // A save request is currently in flight.
+    isSaving: boolean;
+    // When the server last acknowledged a save.
+    lastSavedAt: Date | null;
+    // Message describing the last failed save; null when healthy.
+    saveError: string | null;
+    // Last revision known to be persisted server-side (0 = not known yet).
+    revision: number;
 }
 
 // Asset types
