@@ -54,11 +54,17 @@ function canonicalPageToEditorPage(page: any, designBackground: any): any | null
 // canonical pages into editor pages so page.objects land in
 // page.document.objects) and keep other top-level metadata.
 // `transformKeys` should be run first. Exported for reuse when restoring
-// locally-cached designs that may be in the older server shape.
+// locally-cached designs that may be in either shape.
+//
+// Top-level `pages` always wins when present: the canonical `document` is
+// never rewritten by local edits, so preferring it would resurrect stale
+// content over the edited pages (e.g. on localStorage cache restore).
+// Page and object IDs are passed through untouched in both shapes, so a
+// design loads with the same IDs every time.
 export function normalizeDesign(obj: any): any {
     if (!obj) return obj;
     const out = { ...obj };
-    if (out.document && Array.isArray(out.document.pages)) {
+    if (!Array.isArray(out.pages) && out.document && Array.isArray(out.document.pages)) {
         out.pages = out.document.pages
             .map((page: any) => canonicalPageToEditorPage(page, out.document.background))
             .filter(Boolean);

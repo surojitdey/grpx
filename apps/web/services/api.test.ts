@@ -106,6 +106,37 @@ describe('normalizeDesign', () => {
         expect(out.pages).toEqual(legacy.pages);
     });
 
+    it('prefers top-level pages over canonical document.pages when both exist', () => {
+        const both = {
+            id: 'd7',
+            // Stale canonical snapshot with old content and different IDs
+            document: {
+                pages: [
+                    {
+                        id: 'stale-page-uuid',
+                        name: 'Stale',
+                        objects: [{ id: 'stale-obj', type: 'circle' }],
+                    },
+                ],
+            },
+            // Fresher edited pages (e.g. from a localStorage cache restore)
+            pages: [
+                {
+                    id: 'edited-page-id',
+                    name: 'Edited',
+                    document: {
+                        schemaVersion: '1.0',
+                        objects: [{ id: 'edited-obj', type: 'text' }],
+                        background: { type: 'color', value: '#123456' },
+                    },
+                },
+            ],
+        };
+        const out = normalizeDesign(both);
+        expect(out.pages[0].id).toBe('edited-page-id');
+        expect(out.pages[0].document.objects).toEqual([{ id: 'edited-obj', type: 'text' }]);
+    });
+
     it('handles null/undefined/empty input safely', () => {
         expect(normalizeDesign(null)).toBeNull();
         expect(normalizeDesign(undefined)).toBeUndefined();

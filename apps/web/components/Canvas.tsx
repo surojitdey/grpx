@@ -10,6 +10,58 @@ import {
     createDefaultLine,
 } from '@/utils/editor';
 
+// Instantiate a fabric object for a canonical design object (text, rectangle,
+// circle, line). Shared by top-level loading and group children so every type
+// keeps its shape-specific rendering when the design loads. Image objects load
+// asynchronously and are handled by the callers; returns null for unknown or
+// unsupported types.
+function createFabricObject(obj: any): any | null {
+    if (!obj || typeof obj !== 'object') return null;
+
+    if (obj.type === 'text') {
+        return new fabric.Textbox(obj.content.text, {
+            left: obj.x,
+            top: obj.y,
+            width: obj.width,
+            height: obj.height,
+            fontSize: obj.style?.fontSize || 16,
+            fontFamily: obj.style?.fontFamily || 'Arial',
+            fill: obj.style?.color || '#000000',
+            textAlign: obj.style?.textAlign || 'left',
+        });
+    }
+    if (obj.type === 'rectangle') {
+        return new fabric.Rect({
+            left: obj.x,
+            top: obj.y,
+            width: obj.width,
+            height: obj.height,
+            fill: obj.fill || '#cccccc',
+            stroke: obj.stroke,
+            strokeWidth: obj.strokeWidth || 0,
+        });
+    }
+    if (obj.type === 'circle') {
+        return new fabric.Circle({
+            left: obj.x,
+            top: obj.y,
+            radius: Math.min(obj.width, obj.height) / 2,
+            fill: obj.fill || '#cccccc',
+            stroke: obj.stroke,
+            strokeWidth: obj.strokeWidth || 0,
+        });
+    }
+    if (obj.type === 'line') {
+        return new fabric.Line([0, 0, obj.width, 0], {
+            left: obj.x,
+            top: obj.y,
+            stroke: obj.stroke || '#000000',
+            strokeWidth: obj.strokeWidth || 2,
+        } as any);
+    }
+    return null;
+}
+
 export default function Canvas() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const fabricCanvasRef = useRef<any | null>(null);
@@ -46,50 +98,100 @@ export default function Canvas() {
         // Load objects from current page
         const currentPage = design.pages.find((p) => p.id === currentPageId);
         if (currentPage?.document?.objects) {
+            // Child records referenced by a group are rendered inside that group
+            // only; they must not also be added as independent top-level objects
+            // by the loop below, or they would appear twice on the canvas.
+            const groupedChildIds = new Set<string>();
+            currentPage.document.objects.forEach((o: any) => {
+                if ((o as any)?.type === 'group' && Array.isArray((o as any).children)) {
+                    (o as any).children.forEach((childId: string) => groupedChildIds.add(childId));
+                }
+            });
+
             currentPage.document.objects.forEach((obj) => {
                 let fabricObj: any | null = null;
 
-                if (obj.type === 'text') {
-                    fabricObj = new fabric.Textbox(obj.content.text, {
-                        left: obj.x,
-                        top: obj.y,
-                        width: obj.width,
-                        height: obj.height,
-                        fontSize: (obj as any).style?.fontSize || 16,
-                        fontFamily: (obj as any).style?.fontFamily || 'Arial',
-                        fill: (obj as any).style?.color || '#000000',
-                        textAlign: (obj as any).style?.textAlign || 'left',
-                        selectable: true,
+                // Group-owned children are consumed by their group's branch.
+                if (groupedChildIds.has(obj.id)) return;
+
+                // Text, rectangle, circle and line share the factory below so
+                // group children are instantiated exactly the same way.
+                if (['text', 'rectangle', 'circle', 'line'].includes(obj.type)) {
+                    fabricObj = createFabricObject(obj);
+                    fabricObj?.set({ selectable: true });
+                } else if ((obj as any).type === 'group') {
+                    // Canonical group: children are object IDs resolved from the
+                    // same page's objects list. Unknown child IDs are skipped.
+                    // Fabric Group is absent from the local type defs, hence casts.
+                    const pageObjects: any[] = ((currentPage as any).document.objects || []) as any[];
+                    const childIds: string[] = ((obj as any).children || []) as string[];
+                    const groupChildren: any[] = [];
+                    const imageChildren: any[] = [];
+                    childIds
+                        .map((childId: string) => pageObjects.find((o: any) => o.id === childId))
+                        .filter(Boolean)
+                        .forEach((child: any) => {
+                            if (child.type === 'image') {
+                                // Images load asynchronously; folded in below.
+                                imageChildren.push(child);
+                                return;
+                            }
+                            // Same type-specific instantiation as top-level
+                            // objects, so grouped text/shapes keep their content.
+                            const childObj: any = createFabricObject(child);
+                            if (childObj) {
+                                childObj.set({ selectable: false });
+                                groupChildren.push(childObj);
+                            }
+                        });
+                    // Children are stored in page coordinates (they live in the
+                    // same objects list as the group), so the Group is constructed
+                    // WITHOUT left/top: Fabric derives the group's bounds and
+                    // position from the children's absolute coords. Passing
+                    // obj.x/obj.y here would apply the group offset on top of
+                    // already-absolute child positions and misplace the artwork.
+                    // The group is only built once it has at least one child;
+                    // image-only groups are created lazily by the first image
+                    // callback since images load asynchronously.
+                    const groupHolder: { group: any } = { group: null };
+                    if (groupChildren.length > 0) {
+                        groupHolder.group = new (fabric as any).Group(groupChildren, {
+                            selectable: true,
+                        });
+                    }
+                    // Fold asynchronously loaded image children into the group.
+                    imageChildren.forEach((child: any) => {
+                        const url = child.content?.assetId;
+                        if (!url) return;
+                        fabric.Image.fromURL(
+                            url,
+                            (img: any) => {
+                                if (!effectAlive) return;
+                                img.set({
+                                    left: child.x,
+                                    top: child.y,
+                                    width: child.width,
+                                    height: child.height,
+                                    selectable: false,
+                                    crossOrigin: 'anonymous',
+                                });
+                                if (groupHolder.group) {
+                                    groupHolder.group.addWithUpdate(img);
+                                } else {
+                                    // First child of an image-only group: create it
+                                    // around the image, again without left/top.
+                                    groupHolder.group = new (fabric as any).Group([img], {
+                                        selectable: true,
+                                    });
+                                    (groupHolder.group as any).objId = obj.id;
+                                    fabricCanvas.add(groupHolder.group);
+                                }
+                                fabricCanvas.renderAll();
+                            },
+                            { crossOrigin: 'anonymous' } as any
+                        );
                     });
-                } else if (obj.type === 'rectangle') {
-                    fabricObj = new fabric.Rect({
-                        left: obj.x,
-                        top: obj.y,
-                        width: obj.width,
-                        height: obj.height,
-                        fill: (obj as any).fill || '#cccccc',
-                        stroke: (obj as any).stroke,
-                        strokeWidth: (obj as any).strokeWidth || 0,
-                        selectable: true,
-                    });
-                } else if (obj.type === 'circle') {
-                    fabricObj = new fabric.Circle({
-                        left: obj.x,
-                        top: obj.y,
-                        radius: Math.min(obj.width, obj.height) / 2,
-                        fill: (obj as any).fill || '#cccccc',
-                        stroke: (obj as any).stroke,
-                        strokeWidth: (obj as any).strokeWidth || 0,
-                        selectable: true,
-                    });
-                } else if (obj.type === 'line') {
-                    fabricObj = new fabric.Line([0, 0, obj.width, 0], {
-                        left: obj.x,
-                        top: obj.y,
-                        stroke: (obj as any).stroke || '#000000',
-                        strokeWidth: (obj as any).strokeWidth || 2,
-                        selectable: true,
-                    } as any);
+                    fabricObj = groupHolder.group;
                 } else if (obj.type === 'image') {
                     const url = (obj as any).content?.assetId;
                     if (url) {
