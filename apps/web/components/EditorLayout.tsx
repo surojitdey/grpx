@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useEditorStore } from '@/stores/editor';
-import { designApi, authApi } from '@/services/api';
+import { designApi, authApi, normalizeDesign } from '@/services/api';
 import { debounce } from '@/utils/editor';
 import EditorToolbar from '@/components/EditorToolbar';
 import LeftSidebar from '@/components/LeftSidebar';
@@ -44,10 +44,16 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                 if (cached) {
                     try {
                         const parsed = JSON.parse(cached);
+                        // Cached entries may be in the raw server shape (canonical
+                        // document under `document`, objects under page.objects).
+                        // normalizeDesign converts them into the editor shape so
+                        // cached objects are not silently dropped.
+                        const normalized = normalizeDesign(parsed);
+
                         // Use cached design for fast restore (scoped to user), but
                         // do NOT treat it as authoritative. Launch a background
                         // fetch to reconcile with the server and update if newer.
-                        setDesign(parsed);
+                        setDesign(normalized);
 
                         (async () => {
                             try {
@@ -55,10 +61,10 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                                 const server = response.data as any;
 
                                 // Prefer explicit version field if present, otherwise compare updatedAt timestamps.
-                                const cachedVersion = (parsed as any).currentVersion;
+                                const cachedVersion = (normalized as any).currentVersion;
                                 const serverVersion = server?.currentVersion;
 
-                                const cachedUpdated = parsed?.updatedAt ? new Date(parsed.updatedAt).getTime() : null;
+                                const cachedUpdated = normalized?.updatedAt ? new Date(normalized.updatedAt).getTime() : null;
                                 const serverUpdated = server?.updatedAt ? new Date(server.updatedAt).getTime() : null;
 
                                 let serverIsNewer = false;
@@ -68,7 +74,7 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                                     serverIsNewer = serverUpdated > cachedUpdated;
                                 } else {
                                     // Fallback: shallow compare objects
-                                    serverIsNewer = JSON.stringify(server) !== JSON.stringify(parsed);
+                                    serverIsNewer = JSON.stringify(server) !== JSON.stringify(normalized);
                                 }
 
                                 if (serverIsNewer) {

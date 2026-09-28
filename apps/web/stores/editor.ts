@@ -95,6 +95,25 @@ const addToHistory = (state: any, newDesign: Design) => {
     };
 };
 
+// Ensure a page has a valid document structure with objects array
+const ensurePageDocument = (page: any): any => {
+    if (!page.document || !Array.isArray(page.document.objects)) {
+        return {
+            ...page,
+            document: {
+                schemaVersion: '1.0',
+                objects: [],
+                background: {
+                    type: 'color',
+                    value: '#ffffff',
+                },
+                ...(page.document || {}),
+            },
+        };
+    }
+    return page;
+};
+
 export const useEditorStore = create<EditorState>((set, get) => ({
     design: null,
     currentPageId: null,
@@ -117,12 +136,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     setDesign: (design) =>
         set({
-            design,
-            currentPageId: design.pages[0]?.id,
+            design: design ? {
+                ...design,
+                pages: (design.pages || []).map(ensurePageDocument),
+            } : null,
+            currentPageId: design?.pages?.[0]?.id || null,
             // Reset history when loading a new design so undo/redo applies to the
             // newly loaded document only. Seed initial snapshot for undo.
-            history: [JSON.parse(JSON.stringify(design))],
-            historyIndex: 0,
+            history: design ? [JSON.parse(JSON.stringify({
+                ...design,
+                pages: (design.pages || []).map(ensurePageDocument),
+            }))] : [],
+            historyIndex: design ? 0 : -1,
         }),
 
     setCurrentPage: (pageId) => set({ currentPageId: pageId }),
@@ -166,17 +191,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             if (!state.design || !state.currentPageId) return state;
             const newDesign = {
                 ...state.design,
-                pages: state.design.pages.map((p) =>
-                    p.id === state.currentPageId
-                        ? {
-                            ...p,
+                pages: state.design.pages.map((p) => {
+                    if (p.id === state.currentPageId) {
+                        const page = ensurePageDocument(p);
+                        return {
+                            ...page,
                             document: {
-                                ...p.document,
-                                objects: [...p.document.objects, object],
+                                ...page.document,
+                                objects: [...(page.document.objects || []), object],
                             },
-                        }
-                        : p
-                ),
+                        };
+                    }
+                    return p;
+                }),
             };
             return addToHistory(state, newDesign);
         }),
@@ -186,17 +213,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             if (!state.design || !state.currentPageId) return state;
             const newDesign = {
                 ...state.design,
-                pages: state.design.pages.map((p) =>
-                    p.id === state.currentPageId
-                        ? {
-                            ...p,
+                pages: state.design.pages.map((p) => {
+                    if (p.id === state.currentPageId) {
+                        const page = ensurePageDocument(p);
+                        return {
+                            ...page,
                             document: {
-                                ...p.document,
-                                objects: p.document.objects.filter((obj) => obj.id !== id),
+                                ...page.document,
+                                objects: (page.document.objects || []).filter((obj) => obj.id !== id),
                             },
-                        }
-                        : p
-                ),
+                        };
+                    }
+                    return p;
+                }),
             };
             return {
                 ...addToHistory(state, newDesign),
@@ -209,19 +238,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             if (!state.design || !state.currentPageId) return state;
             const newDesign = {
                 ...state.design,
-                pages: state.design.pages.map((p: any) =>
-                    p.id === state.currentPageId
-                        ? {
-                            ...p,
+                pages: state.design.pages.map((p: any) => {
+                    if (p.id === state.currentPageId) {
+                        const page = ensurePageDocument(p);
+                        return {
+                            ...page,
                             document: {
-                                ...p.document,
-                                objects: p.document.objects.map((obj: any) =>
+                                ...page.document,
+                                objects: (page.document.objects || []).map((obj: any) =>
                                     obj.id === id ? { ...obj, ...updates } : obj
                                 ),
                             },
-                        }
-                        : p
-                ),
+                        };
+                    }
+                    return p;
+                }),
             } as any;
             return addToHistory(state, newDesign);
         }) as any,
@@ -232,7 +263,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             const page = state.design.pages.find((p) => p.id === state.currentPageId);
             if (!page) return state;
 
-            const objects = [...page.document.objects];
+            const safePage = ensurePageDocument(page);
+            const objects = [...(safePage.document.objects || [])];
             const index = objects.findIndex((obj) => obj.id === id);
             if (index === -1) return state;
 
@@ -273,7 +305,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             const page = state.design.pages.find((p) => p.id === state.currentPageId);
             if (!page) return state;
 
-            const objectToDuplicate = page.document.objects.find((obj) => obj.id === id);
+            const safePage = ensurePageDocument(page);
+            const objectToDuplicate = (safePage.document.objects || []).find((obj) => obj.id === id);
             if (!objectToDuplicate) return state;
 
             // Create a copy with a new ID, offset position slightly
@@ -287,17 +320,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
             const newDesign = {
                 ...state.design,
-                pages: state.design.pages.map((p) =>
-                    p.id === state.currentPageId
-                        ? {
-                            ...p,
+                pages: state.design.pages.map((p) => {
+                    if (p.id === state.currentPageId) {
+                        const page = ensurePageDocument(p);
+                        return {
+                            ...page,
                             document: {
-                                ...p.document,
-                                objects: [...p.document.objects, duplicated],
+                                ...page.document,
+                                objects: [...(page.document.objects || []), duplicated],
                             },
-                        }
-                        : p
-                ),
+                        };
+                    }
+                    return p;
+                }),
             };
 
             return {

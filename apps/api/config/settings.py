@@ -79,15 +79,28 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database
+_default_db = {
+    'ENGINE': 'django.db.backends.postgresql',
+    'NAME': env('DB_NAME', default='grpx'),
+    'USER': env('DB_USER', default='surojit'),
+    'PASSWORD': env('DB_PASSWORD', default='password'),
+    'HOST': env('DB_HOST', default='localhost'),
+    'PORT': env('DB_PORT', default='5432'),
+}
+
+# Tests always run against their own database, never the development one.
+# Defaults to `<DB_NAME>_test` on the same server; point TEST_DB_* at a
+# different server/credentials (e.g. via .env.test) to fully isolate tests.
+_default_db['TEST'] = {
+    'NAME': env('TEST_DB_NAME', default=f"{_default_db['NAME']}_test"),
+    'USER': env('TEST_DB_USER', default=_default_db['USER']),
+    'PASSWORD': env('TEST_DB_PASSWORD', default=_default_db['PASSWORD']),
+    'HOST': env('TEST_DB_HOST', default=_default_db['HOST']),
+    'PORT': env('TEST_DB_PORT', default=_default_db['PORT']),
+}
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': env('DB_NAME', default='grpx'),
-        'USER': env('DB_USER', default='surojit'),
-        'PASSWORD': env('DB_PASSWORD', default='password'),
-        'HOST': env('DB_HOST', default='localhost'),
-        'PORT': env('DB_PORT', default='5432'),
-    }
+    'default': _default_db,
 }
 
 # Password validation
