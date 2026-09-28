@@ -2,21 +2,24 @@
 Design views and viewsets
 """
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .documents import clone_document
-from .models import Design
+from .documents import SCHEMA_VERSION, clone_document
+from .models import Design, DesignVersion
 from .serializers import (
     DesignListSerializer,
     DesignDetailSerializer,
     DesignCreateSerializer,
     DesignUpdateSerializer,
     DesignVersionSerializer,
+    DesignDocumentSerializer,
 )
 from .permissions import IsDesignOwner
+from .validation import DocumentValidationError, validate_document
 
 
 class DesignViewSet(viewsets.ModelViewSet):
@@ -124,6 +127,98 @@ class DesignViewSet(viewsets.ModelViewSet):
         design.is_deleted = False
         design.save(update_fields=['is_deleted', 'updated_at'])
         return Response(DesignDetailSerializer(design).data)
+
+    @action(
+        detail=True,
+        methods=['put'],
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
+    def document(self, request, pk=None):
+        """
+        Replace the canonical design document
+
+        PUT /api/v1/designs/{id}/document/
+
+        Validates, in order: schema (canonical document JSON), schema version,
+        and the client's `revision` for optimistic concurrency. On success the
+        document is persisted, `revision` is incremented, and a DesignVersion
+        snapshot is recorded.
+        """
+        design = self.get_object()
+
+        serializer = DesignDocumentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        document = serializer.validated_data['document']
+        client_revision = serializer.validated_data['revision']
+
+        # Canonical schema validation
+        try:
+            validate_document(document)
+        except DocumentValidationError as exc:
+            return Response(
+                {'document': [str(exc)]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Schema version gate (defense in depth: validator also enforces this)
+        if document.get('schemaVersion') != SCHEMA_VERSION:
+            return Response(
+                {'document': [f"Unsupported schemaVersion {document.get('schemaVersion')!r}; expected {SCHEMA_VERSION!r}"]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Optimistic concurrency: reject writes based on stale reads. The
+        # authoritative check happens below under row lock.
+        if client_revision != design.revision:
+            return Response(
+                {
+                    'revision': [
+                        f'Revision conflict: client sent {client_revision}, server has {design.revision}. Reload and retry.'
+                    ]
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            # Lock the row so concurrent saves with the same revision serialize:
+            # the second request re-reads the incremented revision and correctly
+            # gets a 409 instead of racing past the pre-transaction check.
+            locked = Design.objects.select_for_update().get(pk=design.pk)
+            if client_revision != locked.revision:
+                return Response(
+                    {
+                        'revision': [
+                            f'Revision conflict: client sent {client_revision}, server has {locked.revision}. Reload and retry.'
+                        ]
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            design.document = document
+            design.revision = locked.revision + 1
+            # Keep the queryable relational dimensions in sync with the
+            # canonical document so later reads/serializations don't revert
+            # document.width/height to stale values.
+            design.width = document['width']
+            design.height = document['height']
+            design.save(update_fields=['document', 'revision', 'width', 'height', 'updated_at'])
+
+            DesignVersion.objects.create(
+                design=design,
+                version_number=design.revision,
+                document=document,
+                created_by=request.user,
+            )
+
+        return Response(
+            {
+                'id': str(design.id),
+                'revision': design.revision,
+                'schema_version': design.schema_version,
+                'updated_at': design.updated_at,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated, IsDesignOwner])
     def versions(self, request, pk=None):

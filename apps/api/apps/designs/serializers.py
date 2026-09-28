@@ -60,6 +60,18 @@ class DesignUpdateSerializer(serializers.ModelSerializer):
         fields = ['name', 'description', 'width', 'height', 'status', 'is_template']
 
 
+class DesignDocumentSerializer(serializers.Serializer):
+    """
+    Payload for PUT /designs/{id}/document/
+
+    `document` is validated against the canonical schema in validation.py;
+    `revision` carries the client's known revision for optimistic locking.
+    """
+
+    document = serializers.JSONField()
+    revision = serializers.IntegerField(min_value=1)
+
+
 class DesignVersionSerializer(serializers.ModelSerializer):
     """Serializer for design versions"""
     

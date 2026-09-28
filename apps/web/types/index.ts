@@ -80,6 +80,22 @@ export interface Design {
     height: number;
     status: 'draft' | 'published' | 'archived';
     currentVersion: number;
+    // Server-side canonical state: `revision` is used for optimistic
+    // concurrency on document saves, `document` holds the canonical snapshot
+    // as returned by the API (never rewritten by local edits).
+    revision?: number;
+    document?: {
+        schemaVersion?: string;
+        width?: number;
+        height?: number;
+        background?: { type: string; value: string };
+        pages?: Array<{
+            id: string;
+            name?: string;
+            background?: { type: string; value: string };
+            objects?: DesignObject[];
+        }>;
+    };
     pages: DesignPage[];
     createdAt: string;
     updatedAt: string;
