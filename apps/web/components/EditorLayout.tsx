@@ -9,6 +9,7 @@ import {
     buildCanonicalDocument,
     reconcileServerDesign,
 } from '@/services/api';
+import { validateDocument as validateCanonicalDocument } from '@/utils/documentValidation';
 import { debounce } from '@/utils/editor';
 import EditorToolbar from '@/components/EditorToolbar';
 import LeftSidebar from '@/components/LeftSidebar';
@@ -22,9 +23,10 @@ interface EditorLayoutProps {
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
-// Debounce for the server-side document autosave (localStorage drafts below
-// use the same cadence).
-const SERVER_SAVE_DEBOUNCE_MS = 1000;
+// Debounce for the server-side document autosave (the flow is: edits mark the
+// store dirty → serialize → validate → debounced PUT → saved). localStorage
+// drafts below keep their own, faster cadence.
+const SERVER_SAVE_DEBOUNCE_MS = 1500;
 
 function saveErrorMessage(err: any): string {
     const data = err?.response?.data;
@@ -36,8 +38,36 @@ function saveErrorMessage(err: any): string {
     return 'Failed to save changes to the server.';
 }
 
+// Transient failures are safe to retry automatically (the request never
+// reached the server or it failed without state change). 4xx responses are
+// not: 409 means another session saved, and re-PUTting would clobber it.
+function isTransientSaveError(err: any): boolean {
+    if (!err?.response) return true; // network error / offline / timeout
+    const status = err.response.status;
+    return status === 429 || status >= 500;
+}
+
+// Auto-retry cadence for transient save failures.
+const SAVE_RETRY_BASE_MS = 1000;
+const SAVE_RETRY_MAX_MS = 15000;
+const SAVE_RETRY_MAX_ATTEMPTS = 3;
+
+// Format a lastSavedAt as a short wall-clock time for the status pill.
+function formatSavedAt(at: Date | null): string {
+    if (!at) return '';
+    try {
+        return new Intl.DateTimeFormat(undefined, {
+            hour: '2-digit',
+            minute: '2-digit',
+        }).format(at);
+    } catch {
+        return '';
+    }
+}
+
 export default function EditorLayout({ designId }: EditorLayoutProps) {
     const { design, setDesign } = useEditorStore();
+    const persistence = useEditorStore((state) => state.persistence);
     const [error, setError] = useState<string | null>(null);
     const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
     const [saveMessage, setSaveMessage] = useState<string>('');
@@ -60,9 +90,25 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
     const inFlightRef = useRef(false);
     const queuedRef = useRef<{ designId: string; serialized: string } | null>(null);
     const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Auto-retry bookkeeping for transient save failures (see
+    // isTransientSaveError); reset whenever a save succeeds.
+    const retryAttemptsRef = useRef(0);
+    const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const isCurrentTarget = (targetId: string) =>
         useEditorStore.getState().design?.id === targetId;
+
+    const cancelRetryTimer = useCallback(() => {
+        if (retryTimerRef.current !== null) {
+            clearTimeout(retryTimerRef.current);
+            retryTimerRef.current = null;
+        }
+    }, []);
+
+    const clearRetryState = useCallback(() => {
+        cancelRetryTimer();
+        retryAttemptsRef.current = 0;
+    }, [cancelRetryTimer]);
 
     // Push one canonical document to the server, keeping the revision in sync.
     const sendDocument = useCallback(async (targetId: string, serialized: string) => {
@@ -73,73 +119,140 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
             return;
         }
         inFlightRef.current = true;
-        if (isCurrentTarget(targetId)) {
-            setSaveStatus('saving');
-            setSaveMessage('');
+        // Only touch the store's persistence when this design is the one on
+        // screen — a save flushing after a design switch must not leak its
+        // in-flight/error state onto the newly loaded design.
+        if (!isCurrentTarget(targetId)) {
+            // Not current anymore: still serialize + validate so we can surface
+            // client-side validation errors, but never flip the visible save
+            // status/error for a stale target. Bail before we commit to saving
+            // it (we still queued locally, so the finally block will drain it).
+            const staleDocument = JSON.parse(serialized);
+            const issues = validateCanonicalDocument(staleDocument);
+            if (issues.length > 0) {
+                inFlightRef.current = false;
+                queuedRef.current = null;
+                return;
+            }
+            return;
         }
+
+        useEditorStore.getState().saveStarted();
+        setSaveStatus('saving');
+        setSaveMessage('');
+
+        const document = JSON.parse(serialized);
+
+        // Validate step: canonical JSON must pass the same checks the
+        // server applies (mirrored in utils/documentValidation) before it
+        // goes on the wire. Covers debounced saves, resync pushes and
+        // retries alike; a failed validation surfaces the first issue's
+        // path-style message and is never retried automatically.
+        const issues = validateCanonicalDocument(document);
+        if (issues.length > 0) {
+            const message = `${issues[0].path}: ${issues[0].message}`;
+            setSaveStatus('error');
+            setSaveMessage(message);
+            useEditorStore.getState().saveFailed(message);
+            inFlightRef.current = false;
+            queuedRef.current = null;
+            return;
+        }
+
+        // The shared revision ref belongs to the design on screen. For any
+        // other target (e.g. a save flushing after a design switch) fetch
+        // that design's revision directly.
+        let revision = isCurrentTarget(targetId)
+            ? revisionRef.current
+            : null;
+        if (revision == null) {
+            const res = await designApi.getDesign(targetId);
+            revision = res.data?.revision ?? null;
+        }
+        if (revision == null) {
+            inFlightRef.current = false;
+            queuedRef.current = null;
+            return;
+        }
+
+        // No automatic retry on 409: whole documents are replaced, so
+        // blindly re-PUTting would silently overwrite the other session's
+        // intervening changes. Surface the conflict instead — the user
+        // reloads/merges and the next edit saves normally.
+        let response: Awaited<ReturnType<typeof designApi.saveDocument>>;
         try {
-            const document = JSON.parse(serialized);
-
-            // The shared revision ref belongs to the design on screen. For any
-            // other target (e.g. a save flushing after a design switch) fetch
-            // that design's revision directly.
-            let revision = isCurrentTarget(targetId) ? revisionRef.current : null;
-            if (revision == null) {
-                const res = await designApi.getDesign(targetId);
-                revision = res.data?.revision ?? null;
-            }
-            if (revision == null) {
-                throw new Error('Design has no revision');
-            }
-
-            // No automatic retry on 409: whole documents are replaced, so
-            // blindly re-PUTting would silently overwrite the other session's
-            // intervening changes. Surface the conflict instead — the user
-            // reloads/merges and the next edit saves normally.
-            const response = await designApi.saveDocument(targetId, document, revision);
-
-            // Only advance sync state if this design is still the one on
-            // screen; a save finishing after a design switch must not corrupt
-            // the new design's baseline.
-            if (isCurrentTarget(targetId)) {
-                revisionRef.current = response.data.revision ?? revisionRef.current;
-                lastSyncedRef.current = serialized;
-                setSaveStatus('saved');
-
-                // Reflect the new revision/updatedAt on the in-memory design so
-                // cache-restore reconciliation compares fresh metadata. Patched
-                // directly (not via setDesign) to preserve undo history; the
-                // document content is unchanged, so autosave skips it.
-                const state = useEditorStore.getState();
-                if (state.design) {
-                    useEditorStore.setState({
-                        design: {
-                            ...state.design,
-                            revision: response.data.revision ?? state.design.revision,
-                            updatedAt: response.data.updatedAt ?? state.design.updatedAt,
-                        },
-                    });
-                }
-            }
+            response = await designApi.saveDocument(targetId, document, revision);
         } catch (err: any) {
             console.error('Failed to save design document:', err);
-            if (isCurrentTarget(targetId)) {
-                setSaveStatus('error');
-                setSaveMessage(
-                    err?.response?.status === 409
-                        ? 'Saved elsewhere — reload to pick up the latest changes.'
-                        : saveErrorMessage(err)
-                );
+            // Only surface error state for the design that is still on screen —
+            // a save finishing after a design switch must not corrupt the new
+            // design's status/error.
+            if (!isCurrentTarget(targetId)) return;
+
+            useEditorStore.getState().saveFailed(saveErrorMessage(err));
+            setSaveStatus('error');
+            setSaveMessage(
+                err?.response?.status === 409
+                    ? 'Saved elsewhere — reload to pick up the latest changes.'
+                    : saveErrorMessage(err)
+            );
+
+            // Auto-retry only transient failures, never validation/conflict
+            // responses; a 409 must not clobber the other session's changes.
+            if (isTransientSaveError(err)) {
+                if (retryAttemptsRef.current < SAVE_RETRY_MAX_ATTEMPTS) {
+                    retryAttemptsRef.current += 1;
+                    const delay = Math.min(
+                        SAVE_RETRY_BASE_MS * 2 ** (retryAttemptsRef.current - 1),
+                        SAVE_RETRY_MAX_MS
+                    );
+                    cancelRetryTimer();
+                    retryTimerRef.current = setTimeout(() => {
+                        retryTimerRef.current = null;
+                        void sendDocument(targetId, serialized);
+                    }, delay);
+                }
             }
-        } finally {
-            inFlightRef.current = false;
-            const queued = queuedRef.current;
-            if (queued) {
-                queuedRef.current = null;
-                void sendDocument(queued.designId, queued.serialized);
-            }
+            throw err;
         }
-    }, []);
+
+        // Only advance sync state if this design is still the one on
+        // screen; a save finishing after a design switch must not corrupt
+        // the new design's baseline.
+        if (!isCurrentTarget(targetId)) return;
+
+        revisionRef.current = response.data.revision ?? revisionRef.current;
+        lastSyncedRef.current = serialized;
+        setSaveStatus('saved');
+        clearRetryState();
+        useEditorStore.getState().saveSuccessIfCurrent(
+            response.data.revision ?? revisionRef.current ?? 0,
+            new Date(),
+            serialized
+        );
+
+        // Reflect the new revision/updatedAt on the in-memory design so
+        // cache-restore reconciliation compares fresh metadata. Patched
+        // directly (not via setDesign) to preserve undo history; the
+        // document content is unchanged, so autosave skips it.
+        const state = useEditorStore.getState();
+        if (state.design) {
+            const newDoc = JSON.parse(serialized);
+            const serverDoc = response.data.document ?? state.design.document;
+            useEditorStore.setState({
+                design: {
+                    ...state.design,
+                    revision: response.data.revision ?? state.design.revision,
+                    updatedAt: response.data.updatedAt ?? state.design.updatedAt,
+                    document: newDoc.document ?? serverDoc,
+                    pages: state.design.pages.map((p: any) => ({
+                        ...p,
+                        document: p.document ?? (newDoc.document as any)?.pages?.[0]?.document,
+                    })),
+                },
+            });
+        }
+    }, [clearRetryState, cancelRetryTimer]);
 
     useEffect(() => {
         // Reset document-sync state when switching to a different design.
@@ -149,6 +262,10 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         cachedForEditorRef.current = null;
         setSaveStatus('idle');
         setSaveMessage('');
+        // Fresh design: persistence starts clean (setDesign also resets it;
+        // this covers designs that fail to load). The loaded revision is
+        // adopted by the autosave baseline below once the design arrives.
+        useEditorStore.getState().resetPersistence(0);
 
         const loadDesign = async () => {
             try {
@@ -280,7 +397,15 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                 clearTimeout(saveTimerRef.current);
                 saveTimerRef.current = null;
             }
-            if (design.revision != null) revisionRef.current = design.revision;
+            if (design.revision != null) {
+                revisionRef.current = design.revision;
+                // Seed the persistence revision so the UI can report the
+                // server-acked state even before the first local save.
+                const persisted = useEditorStore.getState().persistence;
+                if (persisted.revision !== design.revision) {
+                    useEditorStore.getState().resetPersistence(design.revision);
+                }
+            }
             lastSyncedRef.current = serialized;
             setSaveStatus((status) => (status === 'saving' ? 'idle' : status));
             return;
@@ -293,10 +418,17 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                 saveTimerRef.current = null;
                 setSaveStatus((status) => (status === 'saving' ? 'idle' : status));
             }
+            // Content matches the server again; nothing left to persist.
+            if (useEditorStore.getState().persistence.isDirty) {
+                useEditorStore.getState().markClean();
+            }
             return;
         }
 
+        // Dirty edits awaiting the debounced PUT — distinguishable from an
+        // in-flight request (which shows 'Saving…' once sendDocument runs).
         setSaveStatus('saving');
+        useEditorStore.getState().markDirty();
         if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current);
         saveTimerRef.current = setTimeout(() => {
             saveTimerRef.current = null;
@@ -325,6 +457,18 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
             save.cancel?.();
         };
     }, [design, designId]);
+
+    // Manual retry from the status pill: re-serialize and re-send the *current*
+    // canonical document. Never re-send a stale payload — newer local edits may
+    // have already changed the design, and persisting the stale document would
+    // overwrite them and temporarily mark the newer edits clean.
+    const handleRetrySave = useCallback(() => {
+        if (persistence.isSaving) return;
+        if (!isCurrentTarget(designId)) return;
+        clearRetryState();
+        const serialized = JSON.stringify(buildCanonicalDocument(design));
+        void sendDocument(designId, serialized);
+    }, [persistence.isSaving, design, designId, sendDocument, clearRetryState]);
 
     if (error) {
         return (
@@ -357,12 +501,13 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
 
     return (
         <div className="flex flex-col h-screen bg-gray-50">
-            {/* Save status indicator (server autosave) */}
+            {/* Save status indicator (server autosave), driven by the store's
+                PersistenceState: dirty → debounced validate → PUT → saved. */}
             {saveStatus !== 'idle' && (
                 <div
                     role="status"
                     aria-live="polite"
-                    className={`fixed top-3 right-3 z-50 max-w-[320px] truncate rounded-full px-3 py-1 text-xs font-medium shadow-sm ${
+                    className={`fixed top-3 right-3 z-50 max-w-[320px] rounded-full px-3 py-1 text-xs font-medium shadow-sm ${
                         saveStatus === 'error'
                             ? 'bg-red-100 text-red-700'
                             : saveStatus === 'saving'
@@ -371,9 +516,27 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                     }`}
                     title={saveStatus === 'error' ? saveMessage : undefined}
                 >
-                    {saveStatus === 'saving' && 'Saving…'}
-                    {saveStatus === 'saved' && '✓ Saved'}
-                    {saveStatus === 'error' && `⚠ ${saveMessage}`}
+                    {saveStatus === 'saving' &&
+                        (persistence.isSaving ? 'Saving…' : 'Unsaved changes…')}
+                    {saveStatus === 'saved' &&
+                        (persistence.lastSavedAt
+                            ? `✓ Saved ${formatSavedAt(persistence.lastSavedAt)}`
+                            : '✓ Saved')}
+                    {saveStatus === 'error' && (
+                        <span className="inline-flex items-center gap-2">
+                            <span className="truncate">⚠ {saveMessage}</span>
+                            {persistence.isDirty && (
+                                <button
+                                    type="button"
+                                    onClick={handleRetrySave}
+                                    disabled={persistence.isSaving}
+                                    className="shrink-0 rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                                >
+                                    Retry
+                                </button>
+                            )}
+                        </span>
+                    )}
                 </div>
             )}
 

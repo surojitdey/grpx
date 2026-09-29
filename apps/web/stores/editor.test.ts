@@ -10,6 +10,7 @@ describe('Editor Store', () => {
             selectedObjectIds: [],
             activeTool: 'select',
         });
+        useEditorStore.getState().resetPersistence(0);
     });
 
     // Mock design
@@ -349,6 +350,168 @@ describe('Editor Store', () => {
             useEditorStore.getState().stopEditingText();
             expect(useEditorStore.getState().editingTextId).toBeNull();
             expect(useEditorStore.getState().editingTextValue).toBe('');
+        });
+    });
+
+    describe('persistence state', () => {
+        const makeRect = (id: string, overrides: Record<string, any> = {}): DesignObject =>
+            ({
+                id,
+                type: 'rectangle',
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+                rotation: 0,
+                scaleX: 1,
+                scaleY: 1,
+                opacity: 1,
+                visible: true,
+                locked: false,
+                zIndex: 0,
+                ...overrides,
+            } as any);
+
+        it('starts clean with zero revision', () => {
+            expect(useEditorStore.getState().persistence).toEqual({
+                isDirty: false,
+                isSaving: false,
+                lastSavedAt: null,
+                saveError: null,
+                revision: 0,
+            });
+        });
+
+        it('addObject marks the design dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+        });
+
+        it('removeObject marks the design dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            useEditorStore.getState().saveSuccess(3, new Date('2026-09-28T10:00:00Z'));
+            useEditorStore.getState().removeObject('obj-1');
+            const persistence = useEditorStore.getState().persistence;
+            expect(persistence.isDirty).toBe(true);
+            // A new edit invalidates the previous healthy state.
+            expect(persistence.saveError).toBeNull();
+        });
+
+        it('updateObject marks the design dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            useEditorStore.getState().saveSuccess(1, new Date());
+            useEditorStore.getState().updateObject('obj-1', { x: 42 });
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+        });
+
+        it('reorderObject marks the design dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            useEditorStore.getState().addObject(makeRect('obj-2', { zIndex: 1 }));
+            useEditorStore.getState().saveSuccess(2, new Date());
+            useEditorStore.getState().reorderObject('obj-1', 'up');
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+        });
+
+        it('duplicateObject marks the design dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            useEditorStore.getState().saveSuccess(1, new Date());
+            useEditorStore.getState().duplicateObject('obj-1');
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+        });
+
+        it('undo and redo mark the design dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            useEditorStore.getState().saveSuccess(1, new Date());
+
+            useEditorStore.getState().undo();
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+
+            useEditorStore.getState().saveSuccess(2, new Date());
+            useEditorStore.getState().redo();
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+        });
+
+        it('non-editing actions never mark the design dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().setCurrentPage('page-1');
+            useEditorStore.getState().setSelectedObjects(['obj-1']);
+            useEditorStore.getState().setActiveTool('rectangle');
+            useEditorStore.getState().setZoom(150);
+            expect(useEditorStore.getState().persistence.isDirty).toBe(false);
+        });
+
+        it('setDesign resets persistence (loading is not an edit)', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            useEditorStore.getState().saveFailed('boom');
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+
+            useEditorStore.getState().setDesign({ ...mockDesign, id: 'design-2' });
+            expect(useEditorStore.getState().persistence).toEqual({
+                isDirty: false,
+                isSaving: false,
+                lastSavedAt: null,
+                saveError: null,
+                revision: 0,
+            });
+        });
+
+        it('saveStarted flags in-flight and clears the error', () => {
+            useEditorStore.getState().saveFailed('boom');
+            useEditorStore.getState().saveStarted();
+            const persistence = useEditorStore.getState().persistence;
+            expect(persistence.isSaving).toBe(true);
+            expect(persistence.saveError).toBeNull();
+            expect(persistence.isDirty).toBe(true); // unchanged by saveStarted
+        });
+
+        it('saveSuccess clears dirty/saving and records revision + time', () => {
+            useEditorStore.getState().saveStarted();
+            const savedAt = new Date('2026-09-28T12:00:00Z');
+            useEditorStore.getState().saveSuccess(7, savedAt);
+            expect(useEditorStore.getState().persistence).toEqual({
+                isDirty: false,
+                isSaving: false,
+                lastSavedAt: savedAt,
+                saveError: null,
+                revision: 7,
+            });
+        });
+
+        it('saveFailed keeps the edits dirty and stops the in-flight flag', () => {
+            useEditorStore.getState().saveStarted();
+            useEditorStore.getState().saveFailed('Offline — changes are only saved locally.');
+            const persistence = useEditorStore.getState().persistence;
+            expect(persistence.isSaving).toBe(false);
+            expect(persistence.isDirty).toBe(true);
+            expect(persistence.saveError).toBe('Offline — changes are only saved locally.');
+        });
+
+        it('markClean clears dirty without touching other fields', () => {
+            useEditorStore.getState().saveStarted();
+            useEditorStore.getState().markClean();
+            const persistence = useEditorStore.getState().persistence;
+            expect(persistence.isDirty).toBe(false);
+            expect(persistence.isSaving).toBe(true); // untouched
+        });
+
+        it('resetPersistence fully resets but keeps the given revision', () => {
+            useEditorStore.getState().saveSuccess(5, new Date('2026-09-28T09:00:00Z'));
+            useEditorStore.getState().markDirty();
+            useEditorStore.getState().resetPersistence(5);
+            expect(useEditorStore.getState().persistence).toEqual({
+                isDirty: false,
+                isSaving: false,
+                lastSavedAt: null,
+                saveError: null,
+                revision: 5,
+            });
         });
     });
 });

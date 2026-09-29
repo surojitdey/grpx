@@ -101,6 +101,21 @@ export interface Design {
     updatedAt: string;
 }
 
+// Persistence state for the editor autosave flow:
+// edits → isDirty → debounced serialize → validate → PUT /document → saved.
+export interface PersistenceState {
+    // Local edits not yet acknowledged by the server.
+    isDirty: boolean;
+    // A save request is currently in flight.
+    isSaving: boolean;
+    // When the server last acknowledged a save.
+    lastSavedAt: Date | null;
+    // Message describing the last failed save; null when healthy.
+    saveError: string | null;
+    // Last revision known to be persisted server-side (0 = not known yet).
+    revision: number;
+}
+
 // Asset types
 export interface Asset {
     id: string;
