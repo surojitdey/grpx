@@ -22,6 +22,36 @@ from .permissions import IsDesignOwner
 from .validation import DocumentValidationError, validate_document
 
 
+def revision_conflict_response(client_revision, server_design):
+    """
+    409 Conflict for an optimistic-concurrency mismatch.
+
+    Carries the server's authoritative state (`server_revision` and
+    `current_document`) so a client can resolve the conflict — reload the
+    other version, or retry on top of it — without a second round trip.
+    Local changes are never accepted silently: the stored document is left
+    exactly as-is and the caller must explicitly choose how to proceed.
+
+    `server_design` must be the design re-read under the row lock
+    (`select_for_update`), so the payload reflects the authoritative server
+    state at read time — never a possibly-stale pre-transaction read that a
+    concurrent save could have superseded.
+    """
+    message = (
+        f'Revision conflict: client sent {client_revision}, '
+        f'server has {server_design.revision}. Reload and retry.'
+    )
+    return Response(
+        {
+            'detail': message,
+            'revision': [message],
+            'server_revision': server_design.revision,
+            'current_document': server_design.document,
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 class DesignViewSet(viewsets.ModelViewSet):
     """
     Design management endpoints
@@ -140,9 +170,10 @@ class DesignViewSet(viewsets.ModelViewSet):
         PUT /api/v1/designs/{id}/document/
 
         Validates, in order: schema (canonical document JSON), schema version,
-        and the client's `revision` for optimistic concurrency. On success the
-        document is persisted, `revision` is incremented, and a DesignVersion
-        snapshot is recorded.
+        and the client's `revision` for optimistic concurrency. The revision
+        check runs under a row lock so the 409 always reports the
+        authoritative server state. On success the document is persisted,
+        `revision` is incremented, and a DesignVersion snapshot is recorded.
         """
         design = self.get_object()
 
@@ -167,32 +198,21 @@ class DesignViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Optimistic concurrency: reject writes based on stale reads. The
-        # authoritative check happens below under row lock.
-        if client_revision != design.revision:
-            return Response(
-                {
-                    'revision': [
-                        f'Revision conflict: client sent {client_revision}, server has {design.revision}. Reload and retry.'
-                    ]
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
+        # Optimistic concurrency: the single authoritative check runs under
+        # the row lock below. A pre-transaction fast path would have to build
+        # the 409 from the unlocked `design` read, which a concurrent save can
+        # supersede between get_object() and response construction — the
+        # client would then receive an outdated server_revision/
+        # current_document to display or adopt. Under the lock, the check and
+        # the response state are read together, serialized with any
+        # committing writer.
         with transaction.atomic():
             # Lock the row so concurrent saves with the same revision serialize:
             # the second request re-reads the incremented revision and correctly
-            # gets a 409 instead of racing past the pre-transaction check.
+            # gets a 409 instead of racing past an unlocked read.
             locked = Design.objects.select_for_update().get(pk=design.pk)
             if client_revision != locked.revision:
-                return Response(
-                    {
-                        'revision': [
-                            f'Revision conflict: client sent {client_revision}, server has {locked.revision}. Reload and retry.'
-                        ]
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+                return revision_conflict_response(client_revision, locked)
 
             design.document = document
             design.revision = locked.revision + 1

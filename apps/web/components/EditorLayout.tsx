@@ -8,6 +8,11 @@ import {
     normalizeDesign,
     buildCanonicalDocument,
     reconcileServerDesign,
+    parseRevisionConflict,
+    markConflictPending,
+    clearConflictPending,
+    hasConflictPending,
+    type RevisionConflict,
 } from '@/services/api';
 import { validateDocument as validateCanonicalDocument } from '@/utils/documentValidation';
 import { debounce } from '@/utils/editor';
@@ -71,6 +76,10 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
     const [error, setError] = useState<string | null>(null);
     const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
     const [saveMessage, setSaveMessage] = useState<string>('');
+    // Unresolved revision conflict (409) for the design on screen: the local
+    // changes stay in the editor and the draft cache until the user explicitly
+    // picks a version — nothing is overwritten or discarded automatically.
+    const [conflict, setConflict] = useState<RevisionConflict | null>(null);
 
     // Last design revision acknowledged by the server. Seeded from the loaded
     // design and advanced by every save response. Kept in a ref (rather than
@@ -111,29 +120,21 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
     }, [cancelRetryTimer]);
 
     // Push one canonical document to the server, keeping the revision in sync.
-    const sendDocument = useCallback(async (targetId: string, serialized: string) => {
-        if (inFlightRef.current) {
-            // A save is already running; remember the latest payload and send
-            // it when the current one finishes.
-            queuedRef.current = { designId: targetId, serialized };
-            return;
-        }
-        inFlightRef.current = true;
+    // Split into a gate wrapper (sendDocument, below) and the actual send
+    // (performSend): the wrapper owns the in-flight gate and the queued
+    // payload and releases both in a finally block on every exit path —
+    // success, error, validation failure, design switch. Without that, one
+    // settled save wedged the gate and silently dropped every later save, so
+    // local changes could never reach the server.
+    const performSend = useCallback(async (targetId: string, serialized: string) => {
         // Only touch the store's persistence when this design is the one on
         // screen — a save flushing after a design switch must not leak its
         // in-flight/error state onto the newly loaded design.
         if (!isCurrentTarget(targetId)) {
-            // Not current anymore: still serialize + validate so we can surface
-            // client-side validation errors, but never flip the visible save
-            // status/error for a stale target. Bail before we commit to saving
-            // it (we still queued locally, so the finally block will drain it).
-            const staleDocument = JSON.parse(serialized);
-            const issues = validateCanonicalDocument(staleDocument);
-            if (issues.length > 0) {
-                inFlightRef.current = false;
-                queuedRef.current = null;
-                return;
-            }
+            // Not current anymore: never PUT a design that is no longer on
+            // screen, and never flip the visible save status/error for it.
+            // The wrapper's finally block releases the gate and drains any
+            // payload queued meanwhile (e.g. for the design now shown).
             return;
         }
 
@@ -154,8 +155,6 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
             setSaveStatus('error');
             setSaveMessage(message);
             useEditorStore.getState().saveFailed(message);
-            inFlightRef.current = false;
-            queuedRef.current = null;
             return;
         }
 
@@ -170,32 +169,44 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
             revision = res.data?.revision ?? null;
         }
         if (revision == null) {
-            inFlightRef.current = false;
-            queuedRef.current = null;
             return;
         }
 
         // No automatic retry on 409: whole documents are replaced, so
         // blindly re-PUTting would silently overwrite the other session's
-        // intervening changes. Surface the conflict instead — the user
-        // reloads/merges and the next edit saves normally.
+        // intervening changes. Surface the conflict instead and let the
+        // user choose which version wins (Keep mine / Use server).
         let response: Awaited<ReturnType<typeof designApi.saveDocument>>;
         try {
             response = await designApi.saveDocument(targetId, document, revision);
         } catch (err: any) {
             console.error('Failed to save design document:', err);
+            const conflictInfo = parseRevisionConflict(err);
+            if (conflictInfo) {
+                // Remember the conflict for this design even when the save
+                // flushes after a design switch: the reload path must never
+                // adopt the server version over the rejected local changes.
+                markConflictPending(targetId);
+            }
             // Only surface error state for the design that is still on screen —
             // a save finishing after a design switch must not corrupt the new
             // design's status/error.
             if (!isCurrentTarget(targetId)) return;
 
-            useEditorStore.getState().saveFailed(saveErrorMessage(err));
-            setSaveStatus('error');
-            setSaveMessage(
-                err?.response?.status === 409
-                    ? 'Saved elsewhere — reload to pick up the latest changes.'
-                    : saveErrorMessage(err)
-            );
+            if (conflictInfo) {
+                // Revision conflict: keep every local change on screen and in
+                // the draft cache, record the server's version, and let the
+                // user resolve it explicitly. Nothing is retried or
+                // overwritten automatically.
+                setConflict(conflictInfo);
+                useEditorStore.getState().saveFailed(conflictInfo.message);
+                setSaveStatus('error');
+                setSaveMessage('Saved elsewhere — choose which version to keep.');
+            } else {
+                useEditorStore.getState().saveFailed(saveErrorMessage(err));
+                setSaveStatus('error');
+                setSaveMessage(saveErrorMessage(err));
+            }
 
             // Auto-retry only transient failures, never validation/conflict
             // responses; a 409 must not clobber the other session's changes.
@@ -220,6 +231,11 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         // screen; a save finishing after a design switch must not corrupt
         // the new design's baseline.
         if (!isCurrentTarget(targetId)) return;
+
+        // The server acknowledged this document: any conflict for this design
+        // is resolved — drop the pending marker along with the banner.
+        setConflict(null);
+        clearConflictPending(targetId);
 
         revisionRef.current = response.data.revision ?? revisionRef.current;
         lastSyncedRef.current = serialized;
@@ -254,12 +270,38 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         }
     }, [clearRetryState, cancelRetryTimer]);
 
+    // Gate wrapper for performSend: serializes saves (one in flight, latest
+    // payload queued) and guarantees the gate is released — with the queued
+    // payload drained — no matter how the in-flight send ended. Without this,
+    // a completed (or 409-rejected) save left the gate stuck and every later
+    // autosave or Retry click was silently dropped.
+    const sendDocument = useCallback(async (targetId: string, serialized: string) => {
+        if (inFlightRef.current) {
+            // A save is already running; remember the latest payload and send
+            // it when the current one finishes.
+            queuedRef.current = { designId: targetId, serialized };
+            return;
+        }
+        inFlightRef.current = true;
+        try {
+            await performSend(targetId, serialized);
+        } finally {
+            inFlightRef.current = false;
+            const queued = queuedRef.current;
+            queuedRef.current = null;
+            if (queued) {
+                void sendDocument(queued.designId, queued.serialized);
+            }
+        }
+    }, [performSend]);
+
     useEffect(() => {
         // Reset document-sync state when switching to a different design.
         revisionRef.current = null;
         lastSyncedRef.current = null;
         baselinePendingRef.current = true;
         cachedForEditorRef.current = null;
+        setConflict(null);
         setSaveStatus('idle');
         setSaveMessage('');
         // Fresh design: persistence starts clean (setDesign also resets it;
@@ -296,12 +338,43 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                     const shown = cachedForEditorRef.current;
                     if (!shown) {
                         // Nothing cached on screen — adopt the server design outright.
+                        // (No local state to protect; drop any stale conflict marker.)
+                        clearConflictPending(designId);
                         baselinePendingRef.current = true;
                         cachedForEditorRef.current = server;
                         setDesign(server);
                         return;
                     }
                     const verdict = reconcileServerDesign(server, shown);
+
+                    // A pending 409 conflict means the draft holds changes the
+                    // server rejected. Never silently adopt (and thereby
+                    // overwrite) the server version over them: keep the local
+                    // state on screen and let the user resolve it explicitly.
+                    if (verdict === 'adopt' && hasConflictPending(designId)) {
+                        const sameContent =
+                            JSON.stringify(buildCanonicalDocument(server)) ===
+                            JSON.stringify(buildCanonicalDocument(shown));
+                        if (sameContent) {
+                            // Both sides converged — nothing left to resolve.
+                            clearConflictPending(designId);
+                        } else {
+                            if (allowResync) {
+                                // Only the authoritative fetch surfaces the UI; the
+                                // racing background fetch simply refrains from adopting.
+                                setConflict({
+                                    serverRevision: server?.revision ?? null,
+                                    serverDocument: server?.document ?? null,
+                                    message: `Revision conflict: server is at revision ${server?.revision ?? '?'}, local draft at revision ${shown?.revision ?? '?'}.`,
+                                });
+                                setSaveStatus('error');
+                                setSaveMessage('Saved elsewhere — choose which version to keep.');
+                                useEditorStore.getState().markDirty();
+                            }
+                            return;
+                        }
+                    }
+
                     if (verdict === 'adopt') {
                         // Server is strictly newer — replace cache and editor state.
                         baselinePendingRef.current = true;
@@ -470,6 +543,86 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         void sendDocument(designId, serialized);
     }, [persistence.isSaving, design, designId, sendDocument, clearRetryState]);
 
+    // -- revision conflict resolution ----------------------------------------
+    //
+    // A 409 means another session saved a version this client never saw.
+    // Neither version is destroyed: the server keeps its document (plus a
+    // DesignVersion snapshot of every save) and the local edits stay in the
+    // editor and the draft cache. Resolution is always explicit — nothing is
+    // overwritten or discarded silently in either direction.
+
+    // Keep the local document: adopt the server's revision (so the write
+    // passes optimistic concurrency) and re-PUT the local content on top of
+    // it. This replaces the other session's version only by explicit user
+    // consent; the server keeps a version snapshot of what it replaces.
+    const handleKeepMine = useCallback(async () => {
+        if (persistence.isSaving) return;
+        if (!isCurrentTarget(designId)) return;
+        const pending = conflict;
+        if (!pending) return;
+        clearRetryState();
+        try {
+            let revision = pending.serverRevision;
+            if (revision == null) {
+                const res = await designApi.getDesign(designId);
+                revision = res.data?.revision ?? null;
+            }
+            if (revision == null) {
+                throw new Error('Could not determine the server revision');
+            }
+            revisionRef.current = revision;
+            const latest = useEditorStore.getState().design ?? design;
+            void sendDocument(designId, JSON.stringify(buildCanonicalDocument(latest)));
+        } catch (err) {
+            console.error('Failed to keep local changes:', err);
+            setSaveStatus('error');
+            setSaveMessage('Could not reach the server — your changes are still saved locally.');
+        }
+    }, [conflict, persistence.isSaving, design, designId, sendDocument, clearRetryState]);
+
+    // Use the server version: replace the local document (and draft) with the
+    // stored one. Explicit user action — the load path itself never does this
+    // silently while rejected local changes exist.
+    const handleUseServer = useCallback(async () => {
+        if (persistence.isSaving) return;
+        if (!isCurrentTarget(designId)) return;
+        const pending = conflict;
+        if (!pending) return;
+        clearRetryState();
+        try {
+            let adopted: any = null;
+            if (pending.serverDocument && pending.serverRevision != null) {
+                const currentDesign: any = useEditorStore.getState().design;
+                adopted = normalizeDesign({
+                    ...currentDesign,
+                    pages: undefined,
+                    document: pending.serverDocument,
+                    revision: pending.serverRevision,
+                    width: pending.serverDocument.width ?? currentDesign?.width,
+                    height: pending.serverDocument.height ?? currentDesign?.height,
+                });
+            } else {
+                const res = await designApi.getDesign(designId);
+                adopted = res.data;
+            }
+            if (!adopted) return;
+            // Adopt as the sync baseline (the path a normal load takes): the
+            // autosave effect seeds revisionRef/persistence from it instead of
+            // pushing the just-adopted content straight back to the server.
+            baselinePendingRef.current = true;
+            cachedForEditorRef.current = adopted;
+            clearConflictPending(designId);
+            setConflict(null);
+            setSaveStatus('idle');
+            setSaveMessage('');
+            setDesign(adopted);
+        } catch (err) {
+            console.error('Failed to load the server version:', err);
+            setSaveStatus('error');
+            setSaveMessage('Could not load the server version — your changes are still saved locally.');
+        }
+    }, [conflict, persistence.isSaving, designId, clearRetryState]);
+
     if (error) {
         return (
             <div className="flex items-center justify-center h-screen">
@@ -523,17 +676,45 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                             ? `✓ Saved ${formatSavedAt(persistence.lastSavedAt)}`
                             : '✓ Saved')}
                     {saveStatus === 'error' && (
-                        <span className="inline-flex items-center gap-2">
-                            <span className="truncate">⚠ {saveMessage}</span>
-                            {persistence.isDirty && (
-                                <button
-                                    type="button"
-                                    onClick={handleRetrySave}
-                                    disabled={persistence.isSaving}
-                                    className="shrink-0 rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-red-700 disabled:opacity-50"
-                                >
-                                    Retry
-                                </button>
+                        <span className="inline-flex flex-wrap items-center gap-2">
+                            <span
+                                className="truncate"
+                                title={conflict ? conflict.message : saveMessage}
+                            >
+                                ⚠ {saveMessage}
+                            </span>
+                            {conflict ? (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={handleKeepMine}
+                                        disabled={persistence.isSaving}
+                                        title="Save your version on top of the one stored on the server (the server keeps its version in history)"
+                                        className="shrink-0 rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                                    >
+                                        Keep mine
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleUseServer}
+                                        disabled={persistence.isSaving}
+                                        title="Discard your local changes and load the version saved elsewhere"
+                                        className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-red-700 ring-1 ring-red-300 hover:bg-red-50 disabled:opacity-50"
+                                    >
+                                        Use server
+                                    </button>
+                                </>
+                            ) : (
+                                persistence.isDirty && (
+                                    <button
+                                        type="button"
+                                        onClick={handleRetrySave}
+                                        disabled={persistence.isSaving}
+                                        className="shrink-0 rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                                    >
+                                        Retry
+                                    </button>
+                                )
                             )}
                         </span>
                     )}
