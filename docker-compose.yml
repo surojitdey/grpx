@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -7,12 +5,18 @@ services:
     container_name: design-platform-postgres
     environment:
       POSTGRES_USER: surojit
+      # Must match the password this volume was first initialized with:
+      # POSTGRES_PASSWORD only takes effect on first init of the data dir.
       POSTGRES_PASSWORD: design_password
       POSTGRES_DB: grpx
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Host ports are offset: a host-level PostgreSQL (systemd) already
+      # owns 5432 on this machine. Containers reach this service as
+      # `postgres:5432` on the internal network; 5433 is only for host
+      # tools that want the containerized DB.
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U surojit -d grpx"]
       interval: 10s
@@ -24,7 +28,10 @@ services:
     image: redis:7-alpine
     container_name: design-platform-redis
     ports:
-      - "6379:6379"
+      # Offset for the same reason as postgres: a host-level redis-server
+      # (systemd) already owns 127.0.0.1:6379. Containers reach this
+      # service as `redis:6379` on the internal network.
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -39,16 +46,22 @@ services:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.api
     container_name: design-platform-api
+    # The image WORKDIR is /app/api — run from there directly.
     command: >
-      sh -c "cd apps/api &&
-             python manage.py migrate &&
+      sh -c "python manage.py migrate &&
              python manage.py runserver 0.0.0.0:8000"
     environment:
       - DATABASE_URL=postgresql://surojit:design_password@postgres:5432/grpx
+      # settings.py reads DB_* (not DATABASE_URL). DB_HOST must be the
+      # compose service name (`postgres`). Inside a container, `localhost`
+      # is the container itself, not the host or the postgres service, so
+      # it yields "Connection refused".
+      - DB_HOST=postgres
+      - DB_PASSWORD=design_password
       - REDIS_URL=redis://redis:6379/0
       - DJANGO_SECRET_KEY=dev-secret-key-change-in-production
       - DJANGO_DEBUG=True
-      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,api
+      - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,api
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     ports:
@@ -68,11 +81,13 @@ services:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.worker
     container_name: design-platform-worker
+    # The image WORKDIR is /app/api — run from there directly.
     command: >
-      sh -c "cd apps/api &&
-             celery -A config worker -l info"
+      sh -c "celery -A config worker -l info"
     environment:
       - DATABASE_URL=postgresql://surojit:design_password@postgres:5432/grpx
+      - DB_HOST=postgres
+      - DB_PASSWORD=design_password
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -88,8 +103,8 @@ services:
   # Next.js Frontend
   web:
     build:
-      context: ./apps/web
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.web
     container_name: design-platform-web
     command: npm run dev
     environment:
