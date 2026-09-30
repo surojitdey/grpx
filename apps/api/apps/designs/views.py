@@ -4,22 +4,27 @@ Design views and viewsets
 
 from django.db import transaction
 from django.utils import timezone
-from rest_framework import status, viewsets, permissions
+from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from .documents import SCHEMA_VERSION, clone_document
 from .models import Design, DesignVersion
+from .permissions import IsDesignOwner
 from .serializers import (
-    DesignListSerializer,
-    DesignDetailSerializer,
     DesignCreateSerializer,
+    DesignDetailSerializer,
+    DesignDocumentSerializer,
+    DesignListSerializer,
     DesignUpdateSerializer,
     DesignVersionSerializer,
-    DesignDocumentSerializer,
 )
-from .permissions import IsDesignOwner
 from .validation import DocumentValidationError, validate_document
+
+# Autosave snapshots are frequent, so DesignVersion history must not grow
+# without bound. Keep the most recent K versions per design — enough to browse
+# and restore recent milestones — and prune older ones on each save.
+KEEP_VERSIONS = 50
 
 
 def revision_conflict_response(client_revision, server_design):
@@ -38,15 +43,15 @@ def revision_conflict_response(client_revision, server_design):
     concurrent save could have superseded.
     """
     message = (
-        f'Revision conflict: client sent {client_revision}, '
-        f'server has {server_design.revision}. Reload and retry.'
+        f"Revision conflict: client sent {client_revision}, "
+        f"server has {server_design.revision}. Reload and retry."
     )
     return Response(
         {
-            'detail': message,
-            'revision': [message],
-            'server_revision': server_design.revision,
-            'current_document': server_design.document,
+            "detail": message,
+            "revision": [message],
+            "server_revision": server_design.revision,
+            "current_document": server_design.document,
         },
         status=status.HTTP_409_CONFLICT,
     )
@@ -61,25 +66,25 @@ class DesignViewSet(viewsets.ModelViewSet):
 
     serializer_class = DesignDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
-    filterset_fields = ['status', 'is_template']
-    search_fields = ['name', 'description']
-    ordering_fields = ['created_at', 'updated_at', 'name']
-    ordering = ['-updated_at']
+    filterset_fields = ["status", "is_template"]
+    search_fields = ["name", "description"]
+    ordering_fields = ["created_at", "updated_at", "name"]
+    ordering = ["-updated_at"]
 
     def get_queryset(self):
         """Only designs owned by the current user; soft-deleted ones are hidden except when restoring"""
         queryset = Design.objects.filter(owner=self.request.user)
-        if self.action != 'restore':
+        if self.action != "restore":
             queryset = queryset.filter(is_deleted=False)
         return queryset
 
     def get_serializer_class(self):
         """Use different serializers for different actions"""
-        if self.action == 'list':
+        if self.action == "list":
             return DesignListSerializer
-        elif self.action == 'create':
+        elif self.action == "create":
             return DesignCreateSerializer
-        elif self.action in ['update', 'partial_update']:
+        elif self.action in ["update", "partial_update"]:
             return DesignUpdateSerializer
         return DesignDetailSerializer
 
@@ -90,10 +95,7 @@ class DesignViewSet(viewsets.ModelViewSet):
         self.perform_create(serializer)
 
         design = serializer.instance
-        return Response(
-            DesignDetailSerializer(design).data,
-            status=status.HTTP_201_CREATED
-        )
+        return Response(DesignDetailSerializer(design).data, status=status.HTTP_201_CREATED)
 
     def perform_create(self, serializer):
         """Ensure owner is set to current user"""
@@ -102,8 +104,10 @@ class DesignViewSet(viewsets.ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         """Return the canonical document and revision metadata, tracking last opened time"""
         design = self.get_object()
-        design.last_opened_at = timezone.now()
-        design.save(update_fields=['last_opened_at'])
+        # Touch last_opened_at with a targeted UPDATE instead of design.save():
+        # a full instance save would emit pre_save/post_save signals and rewrite
+        # every column (including `document`) on what is semantically a read.
+        Design.objects.filter(pk=design.pk).update(last_opened_at=timezone.now())
         return Response(self.get_serializer(design).data)
 
     def partial_update(self, request, *args, **kwargs):
@@ -118,10 +122,14 @@ class DesignViewSet(viewsets.ModelViewSet):
         """Soft delete a design instead of removing it immediately"""
         design = self.get_object()
         design.is_deleted = True
-        design.save(update_fields=['is_deleted', 'updated_at'])
+        design.save(update_fields=["is_deleted", "updated_at"])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated, IsDesignOwner])
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
     def duplicate(self, request, pk=None):
         """
         Duplicate a design
@@ -136,17 +144,18 @@ class DesignViewSet(viewsets.ModelViewSet):
             description=design.description,
             width=design.width,
             height=design.height,
-            status='draft',
+            status="draft",
             document=clone_document(design.document),
             schema_version=design.schema_version,
         )
 
-        return Response(
-            DesignDetailSerializer(new_design).data,
-            status=status.HTTP_201_CREATED
-        )
+        return Response(DesignDetailSerializer(new_design).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated, IsDesignOwner])
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
     def restore(self, request, pk=None):
         """
         Restore a soft-deleted design
@@ -155,12 +164,12 @@ class DesignViewSet(viewsets.ModelViewSet):
         """
         design = self.get_object()
         design.is_deleted = False
-        design.save(update_fields=['is_deleted', 'updated_at'])
+        design.save(update_fields=["is_deleted", "updated_at"])
         return Response(DesignDetailSerializer(design).data)
 
     @action(
         detail=True,
-        methods=['put'],
+        methods=["put"],
         permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
     )
     def document(self, request, pk=None):
@@ -179,22 +188,26 @@ class DesignViewSet(viewsets.ModelViewSet):
 
         serializer = DesignDocumentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        document = serializer.validated_data['document']
-        client_revision = serializer.validated_data['revision']
+        document = serializer.validated_data["document"]
+        client_revision = serializer.validated_data["revision"]
 
         # Canonical schema validation
         try:
             validate_document(document)
         except DocumentValidationError as exc:
             return Response(
-                {'document': [str(exc)]},
+                {"document": [str(exc)]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Schema version gate (defense in depth: validator also enforces this)
-        if document.get('schemaVersion') != SCHEMA_VERSION:
+        if document.get("schemaVersion") != SCHEMA_VERSION:
             return Response(
-                {'document': [f"Unsupported schemaVersion {document.get('schemaVersion')!r}; expected {SCHEMA_VERSION!r}"]},
+                {
+                    "document": [
+                        f"Unsupported schemaVersion {document.get('schemaVersion')!r}; expected {SCHEMA_VERSION!r}"
+                    ]
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -214,33 +227,54 @@ class DesignViewSet(viewsets.ModelViewSet):
             if client_revision != locked.revision:
                 return revision_conflict_response(client_revision, locked)
 
-            design.document = document
-            design.revision = locked.revision + 1
+            # Mutate and persist the locked instance, never the pre-lock read:
+            # `locked` is the authoritative row state under the lock, so the
+            # write cannot resurrect a value a concurrent transaction changed
+            # between get_object() and the lock. Keeping all reads/writes on one
+            # instance makes the serialization guarantee self-evident.
+            locked.document = document
+            locked.revision += 1
             # Keep the queryable relational dimensions in sync with the
             # canonical document so later reads/serializations don't revert
             # document.width/height to stale values.
-            design.width = document['width']
-            design.height = document['height']
-            design.save(update_fields=['document', 'revision', 'width', 'height', 'updated_at'])
+            locked.width = document["width"]
+            locked.height = document["height"]
+            locked.save(update_fields=["document", "revision", "width", "height", "updated_at"])
 
             DesignVersion.objects.create(
-                design=design,
-                version_number=design.revision,
+                design=locked,
+                version_number=locked.revision,
                 document=document,
                 created_by=request.user,
             )
 
+            # Bound the history so the table tracks save milestones rather than
+            # edit tempo. Done inside the same transaction as the insert: an
+            # autosave has already stored the newest snapshot, so pruning there
+            # keeps at most KEEP_VERSIONS rows after every successful save.
+            stale_ids = list(
+                DesignVersion.objects.filter(design=locked)
+                .order_by("-version_number")
+                .values_list("id", flat=True)[KEEP_VERSIONS:]
+            )
+            if stale_ids:
+                DesignVersion.objects.filter(id__in=stale_ids).delete()
+
         return Response(
             {
-                'id': str(design.id),
-                'revision': design.revision,
-                'schema_version': design.schema_version,
-                'updated_at': design.updated_at,
+                "id": str(locked.id),
+                "revision": locked.revision,
+                "schema_version": locked.schema_version,
+                "updated_at": locked.updated_at,
             },
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated, IsDesignOwner])
+    @action(
+        detail=True,
+        methods=["get"],
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
     def versions(self, request, pk=None):
         """
         Get design version history

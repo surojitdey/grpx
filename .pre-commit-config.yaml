@@ -13,7 +13,9 @@ repos:
     rev: 24.1.1
     hooks:
       - id: black
-        language_version: python3.12
+        # `python3.12` is not installed everywhere the repo is checked out;
+        # resolve against whatever `python3` the environment provides.
+        language_version: python3
         args: ['--line-length=100']
         files: ^apps/api/
         exclude: ^apps/api/migrations/
@@ -34,7 +36,7 @@ repos:
           - 'flake8-bugbear'
 
 # Global settings
-default_stages: [commit]
+default_stages: [pre-commit]
 fail_fast: false
 exclude: |
   (?x)^(

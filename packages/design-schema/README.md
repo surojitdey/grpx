@@ -101,7 +101,20 @@ Migration system is available for future schema upgrades.
 
 ## Validation
 
-- Use Zod for TypeScript validation
-- Use Pydantic for Python validation
-- Backend validates all incoming design documents
-- Frontend validates before sending to backend
+The envelope constraints live in **`schema-spec.json`** — the single source of
+truth. Both runtime validators are generated from it and committed:
+
+- `apps/web/utils/documentValidation.ts` (client mirror, autosave "Validate" step)
+- `apps/api/apps/designs/validation.py` (server enforcement)
+
+```bash
+node packages/design-schema/generate.js
+```
+
+Do not edit the two generated validators by hand — change the spec and
+regenerate, or the runtimes will drift apart again. `validation.ts` in this
+package holds the Zod schemas for TypeScript consumers that want rich
+parse/typed output; the generated ones intentionally mirror each other's
+error semantics exactly (same paths, same messages).
+
+`types.ts` remains the hand-written canonical shape documentation.
