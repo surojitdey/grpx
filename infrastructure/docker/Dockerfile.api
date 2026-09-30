@@ -1,5 +1,6 @@
 # Backend API Dockerfile
-FROM python:3.11-slim
+# Django 6.x requires Python >= 3.12 (requirements.txt pins Django==6.0.8).
+FROM python:3.14-slim
 
 WORKDIR /app
 

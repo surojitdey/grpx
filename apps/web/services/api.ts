@@ -143,6 +143,76 @@ export function reconcileServerDesign(server: any, cached: any): 'adopt' | 'resy
     return 'keep';
 }
 
+// --- pending conflict marker -------------------------------------------------
+// A 409 means the local draft carries changes the server rejected. The marker
+// survives reloads so the load path can distinguish "stale cache" (safe to
+// adopt the newer server version) from "rejected local changes" (must never
+// be silently overwritten by adopting): with the marker set, reconcileServerDesign's
+// 'adopt' verdict is held back and the conflict is surfaced for explicit
+// user resolution instead.
+function conflictMarkerKey(userId: string, designId: string): string {
+    return `design-editor-conflict:${userId}:${designId}`;
+}
+
+function currentDraftUserId(): string {
+    if (typeof window === 'undefined') return 'anon';
+    return localStorage.getItem('current_user_id') || 'anon';
+}
+
+export function markConflictPending(designId: string): void {
+    try {
+        localStorage.setItem(conflictMarkerKey(currentDraftUserId(), designId), String(Date.now()));
+    } catch {
+        // Storage unavailable — the in-memory conflict state still protects the session.
+    }
+}
+
+export function clearConflictPending(designId: string): void {
+    try {
+        localStorage.removeItem(conflictMarkerKey(currentDraftUserId(), designId));
+    } catch {
+        // ignore
+    }
+}
+
+export function hasConflictPending(designId: string): boolean {
+    try {
+        return localStorage.getItem(conflictMarkerKey(currentDraftUserId(), designId)) !== null;
+    } catch {
+        return false;
+    }
+}
+
+// Conflict state parsed from a 409 response to PUT /designs/{id}/document/.
+// `serverRevision` is the revision the server currently holds and
+// `serverDocument` is the canonical document stored under it, so the editor
+// can offer explicit resolution (keep local / adopt server) without another
+// fetch — and never silently overwrite either side.
+export interface RevisionConflict {
+    serverRevision: number | null;
+    serverDocument: any | null;
+    message: string;
+}
+
+// Extract the conflict payload from an axios error returned by saveDocument.
+// Returns null for any error that is not a revision conflict (409), so
+// callers can branch on it: `const conflict = parseRevisionConflict(err)`.
+export function parseRevisionConflict(err: any): RevisionConflict | null {
+    if (err?.response?.status !== 409) return null;
+    const data = err.response.data || {};
+    const message =
+        typeof data.detail === 'string'
+            ? data.detail
+            : Array.isArray(data.revision) && typeof data.revision[0] === 'string'
+              ? data.revision[0]
+              : 'Saved elsewhere — reload to pick up the latest changes.';
+    return {
+        serverRevision: typeof data.server_revision === 'number' ? data.server_revision : null,
+        serverDocument: data.current_document ?? null,
+        message,
+    };
+}
+
 // Add token to requests
 client.interceptors.request.use((config) => {
     // Allow callers to skip attaching the Authorization header by setting

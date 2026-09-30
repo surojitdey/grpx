@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest';
-import { normalizeDesign, buildCanonicalDocument, reconcileServerDesign } from './api';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+    normalizeDesign,
+    buildCanonicalDocument,
+    reconcileServerDesign,
+    parseRevisionConflict,
+    markConflictPending,
+    clearConflictPending,
+    hasConflictPending,
+} from './api';
 
 // `normalizeDesign` expects transformKeys to have run already, so feed it
 // camelCase input exactly like designApi.getDesign does.
@@ -329,5 +337,100 @@ describe('reconcileServerDesign', () => {
         const undatedCached = { ...cached };
         delete (undatedCached as any).updatedAt;
         expect(reconcileServerDesign(undatedServer, undatedCached)).toBe('keep');
+    });
+});
+
+// parseRevisionConflict turns a 409 from saveDocument into the server's
+// authoritative revision + document, enabling explicit conflict resolution
+// without a second fetch. Anything else must yield null (no conflict state).
+describe('parseRevisionConflict', () => {
+    const serverDocument = {
+        schemaVersion: '1.0',
+        width: 1080,
+        height: 1080,
+        background: { type: 'color', value: '#FFFFFF' },
+        pages: [{ id: 'p1', name: 'Page 1', objects: [{ id: 'server-obj' }] }],
+    };
+
+    const conflictError = {
+        response: {
+            status: 409,
+            data: {
+                detail:
+                    'Revision conflict: client sent 3, server has 5. Reload and retry.',
+                revision: ['Revision conflict: client sent 3, server has 5. Reload and retry.'],
+                server_revision: 5,
+                current_document: serverDocument,
+            },
+        },
+    };
+
+    it('extracts the server revision, document, and message from a 409', () => {
+        const conflict = parseRevisionConflict(conflictError);
+        expect(conflict).not.toBeNull();
+        expect(conflict!.serverRevision).toBe(5);
+        expect(conflict!.serverDocument).toEqual(serverDocument);
+        expect(conflict!.message).toContain('client sent 3');
+    });
+
+    it('falls back to the revision field when detail is absent', () => {
+        const conflict = parseRevisionConflict({
+            response: { status: 409, data: { revision: ['stale write rejected'] } },
+        });
+        expect(conflict!.message).toBe('stale write rejected');
+        expect(conflict!.serverRevision).toBeNull();
+        expect(conflict!.serverDocument).toBeNull();
+    });
+
+    it('still reports a conflict when the body lacks resolvable state', () => {
+        const conflict = parseRevisionConflict({ response: { status: 409, data: {} } });
+        expect(conflict).not.toBeNull();
+        expect(conflict!.serverRevision).toBeNull();
+        expect(conflict!.serverDocument).toBeNull();
+        expect(conflict!.message).toContain('reload');
+    });
+
+    it('returns null for non-conflict errors (never triggers resolution UI)', () => {
+        expect(parseRevisionConflict({ response: { status: 400, data: {} } })).toBeNull();
+        expect(parseRevisionConflict({ response: { status: 500, data: {} } })).toBeNull();
+        expect(parseRevisionConflict(new Error('network down'))).toBeNull();
+        expect(parseRevisionConflict(undefined)).toBeNull();
+    });
+});
+
+// The pending-conflict marker survives reloads so the load path never adopts
+// (and overwrites) a newer server version while rejected local changes still
+// sit in the draft cache — the conflict must be re-surfaced for the user.
+describe('conflict marker', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        localStorage.setItem('current_user_id', 'user-1');
+    });
+
+    it('marks, detects, and clears a pending conflict for a design', () => {
+        expect(hasConflictPending('design-1')).toBe(false);
+        markConflictPending('design-1');
+        expect(hasConflictPending('design-1')).toBe(true);
+        clearConflictPending('design-1');
+        expect(hasConflictPending('design-1')).toBe(false);
+    });
+
+    it('is scoped per design', () => {
+        markConflictPending('design-1');
+        expect(hasConflictPending('design-2')).toBe(false);
+        expect(hasConflictPending('design-1')).toBe(true);
+    });
+
+    it('is scoped per user (drafts are user-scoped)', () => {
+        markConflictPending('design-1');
+        localStorage.setItem('current_user_id', 'user-2');
+        expect(hasConflictPending('design-1')).toBe(false);
+        localStorage.setItem('current_user_id', 'user-1');
+        expect(hasConflictPending('design-1')).toBe(true);
+    });
+
+    it('clearing a marker that was never set is a no-op', () => {
+        expect(() => clearConflictPending('design-x')).not.toThrow();
+        expect(hasConflictPending('design-x')).toBe(false);
     });
 });
