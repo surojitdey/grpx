@@ -2,6 +2,8 @@
 Design serializers
 """
 
+import json
+
 from rest_framework import serializers
 
 from .documents import build_default_document
@@ -14,9 +16,19 @@ class DesignListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Design
         fields = [
-            'id', 'name', 'description', 'width', 'height', 'status',
-            'is_template', 'schema_version', 'revision', 'thumbnail_key',
-            'created_at', 'updated_at', 'last_opened_at',
+            "id",
+            "name",
+            "description",
+            "width",
+            "height",
+            "status",
+            "is_template",
+            "schema_version",
+            "revision",
+            "thumbnail_key",
+            "created_at",
+            "updated_at",
+            "last_opened_at",
         ]
         read_only_fields = fields
 
@@ -27,13 +39,30 @@ class DesignDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Design
         fields = [
-            'id', 'name', 'description', 'width', 'height', 'status',
-            'is_template', 'document', 'schema_version', 'revision',
-            'thumbnail_key', 'created_at', 'updated_at', 'last_opened_at',
+            "id",
+            "name",
+            "description",
+            "width",
+            "height",
+            "status",
+            "is_template",
+            "document",
+            "schema_version",
+            "revision",
+            "thumbnail_key",
+            "created_at",
+            "updated_at",
+            "last_opened_at",
         ]
         read_only_fields = [
-            'id', 'document', 'schema_version', 'revision', 'thumbnail_key',
-            'created_at', 'updated_at', 'last_opened_at',
+            "id",
+            "document",
+            "schema_version",
+            "revision",
+            "thumbnail_key",
+            "created_at",
+            "updated_at",
+            "last_opened_at",
         ]
 
 
@@ -42,13 +71,13 @@ class DesignCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Design
-        fields = ['name', 'description', 'width', 'height', 'status', 'is_template']
+        fields = ["name", "description", "width", "height", "status", "is_template"]
 
     def create(self, validated_data):
         """Create a design with a default background and one blank page"""
-        width = validated_data.get('width', 1080)
-        height = validated_data.get('height', 1080)
-        validated_data['document'] = build_default_document(width, height)
+        width = validated_data.get("width", 1080)
+        height = validated_data.get("height", 1080)
+        validated_data["document"] = build_default_document(width, height)
         return Design.objects.create(**validated_data)
 
 
@@ -57,7 +86,7 @@ class DesignUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Design
-        fields = ['name', 'description', 'width', 'height', 'status', 'is_template']
+        fields = ["name", "description", "width", "height", "status", "is_template"]
 
 
 class DesignDocumentSerializer(serializers.Serializer):
@@ -66,16 +95,33 @@ class DesignDocumentSerializer(serializers.Serializer):
 
     `document` is validated against the canonical schema in validation.py;
     `revision` carries the client's known revision for optimistic locking.
+
+    A size cap is enforced here, at the boundary: a valid schema can still be
+    pathologically large (tens of thousands of objects), and such a write is
+    expensive to validate, store and snapshot on every autosave.
     """
+
+    # 2 MiB of JSON is far beyond any realistic canvas while still bounding
+    # the cost of validation, storage and version snapshots per save.
+    MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 
     document = serializers.JSONField()
     revision = serializers.IntegerField(min_value=1)
 
+    def validate_document(self, value):
+        try:
+            encoded = len(json.dumps(value))
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("document must be JSON-serializable")
+        if encoded > self.MAX_DOCUMENT_BYTES:
+            raise serializers.ValidationError("document exceeds the maximum allowed size")
+        return value
+
 
 class DesignVersionSerializer(serializers.ModelSerializer):
     """Serializer for design versions"""
-    
+
     class Meta:
         model = DesignVersion
-        fields = ['id', 'version_number', 'change_description', 'created_by', 'created_at']
+        fields = ["id", "version_number", "change_description", "created_by", "created_at"]
         read_only_fields = fields

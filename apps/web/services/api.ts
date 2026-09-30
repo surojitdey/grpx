@@ -109,6 +109,41 @@ export function buildCanonicalDocument(design: any): any {
     };
 }
 
+// Stable serialization: JSON.stringify with object keys recursively sorted, so
+// structurally equal documents always produce identical strings regardless of
+// the key insertion order each producer happened to use (server JSON, axios key
+// transforms, IndexedDB journals, undo-history clones). Plain JSON.stringify of
+// two equal documents can differ, which made content comparisons report
+// spurious differences. Use for equality checks only — the wire payload is
+// insensitive to key order.
+export function canonicalStringify(value: any): string {
+    return JSON.stringify(value, (_key, val) => {
+        if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+            const sorted: Record<string, any> = {};
+            for (const key of Object.keys(val).sort()) {
+                sorted[key] = val[key];
+            }
+            return sorted;
+        }
+        return val;
+    });
+}
+
+// Compare two designs by canonical content, with key-order-insensitive
+// comparison (see canonicalStringify). False on any failure — callers treat
+// "cannot compare" as "different".
+export function sameCanonicalContent(a: any, b: any): boolean {
+    if (!a || !b) return false;
+    try {
+        return (
+            canonicalStringify(buildCanonicalDocument(a)) ===
+            canonicalStringify(buildCanonicalDocument(b))
+        );
+    } catch {
+        return false;
+    }
+}
+
 // Decide how a freshly fetched server design relates to the locally-cached
 // one, without ever discarding unsynced local edits on a guess:
 //   'adopt'  – server is strictly newer (higher revision); replace the cache
@@ -123,13 +158,11 @@ export function reconcileServerDesign(server: any, cached: any): 'adopt' | 'resy
         if (serverRevision > cachedRevision) return 'adopt';
         if (serverRevision < cachedRevision) return 'keep';
         // Equal revisions: the cache sits at the same save point, so any
-        // content difference is an unsynced local edit.
-        return (
-            JSON.stringify(buildCanonicalDocument(server)) ===
-            JSON.stringify(buildCanonicalDocument(cached))
-                ? 'keep'
-                : 'resync'
-        );
+        // content difference is an unsynced local edit. Compared with
+        // key-order-insensitive serialization so equal content is never
+        // misread as an edit just because the producers ordered keys
+        // differently.
+        return sameCanonicalContent(server, cached) ? 'keep' : 'resync';
     }
 
     // No comparable revisions (e.g. a cache written before revisions were

@@ -14,6 +14,16 @@ import {
     hasConflictPending,
     type RevisionConflict,
 } from '@/services/api';
+import {
+    loadRecoveryDraft,
+    saveRecoveryDraft,
+    clearRecoveryDraft,
+    shouldOfferRecovery,
+    savedMatchesRecovery,
+    currentRecoveryUserId,
+    RECOVERY_DEBOUNCE_MS,
+    type RecoveryDraft,
+} from '@/services/draftRecovery';
 import { validateDocument as validateCanonicalDocument } from '@/utils/documentValidation';
 import { debounce } from '@/utils/editor';
 import EditorToolbar from '@/components/EditorToolbar';
@@ -80,6 +90,18 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
     // changes stay in the editor and the draft cache until the user explicitly
     // picks a version — nothing is overwritten or discarded automatically.
     const [conflict, setConflict] = useState<RevisionConflict | null>(null);
+    // Unsynced work journalled in IndexedDB by an earlier session (a crash, a
+    // dropped network or an interrupted save) that the editor is not already
+    // showing. Surfaced as an explicit Restore / Discard prompt — never
+    // applied or dropped silently.
+    const [recovery, setRecovery] = useState<RecoveryDraft | null>(null);
+    // Resolved user id, so the recovery journal is written under the same
+    // user-scoped key the load path reads from.
+    const userIdRef = useRef<string>('anon');
+    // Mirrors `recovery` for the journal effect: a snapshot awaiting a
+    // Restore/Discard decision must never be overwritten or cleared by the
+    // autosave journalling that runs as soon as a design is on screen.
+    const recoveryPendingRef = useRef<RecoveryDraft | null>(null);
 
     // Last design revision acknowledged by the server. Seeded from the loaded
     // design and advanced by every save response. Kept in a ref (rather than
@@ -165,8 +187,20 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
             ? revisionRef.current
             : null;
         if (revision == null) {
-            const res = await designApi.getDesign(targetId);
-            revision = res.data?.revision ?? null;
+            // Reaching the server just to discover the revision can fail too;
+            // surface it through state instead of letting it escape as an
+            // unhandled rejection from a `void sendDocument(...)` caller.
+            try {
+                const res = await designApi.getDesign(targetId);
+                revision = res.data?.revision ?? null;
+            } catch (err: any) {
+                if (isCurrentTarget(targetId)) {
+                    useEditorStore.getState().saveFailed(saveErrorMessage(err));
+                    setSaveStatus('error');
+                    setSaveMessage(saveErrorMessage(err));
+                }
+                return;
+            }
         }
         if (revision == null) {
             return;
@@ -233,9 +267,20 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         if (!isCurrentTarget(targetId)) return;
 
         // The server acknowledged this document: any conflict for this design
-        // is resolved — drop the pending marker along with the banner.
+        // is resolved — drop the pending marker along with the banner. The
+        // unsynced-work journal, however, is only dropped when the document
+        // that was just saved *is* the pending snapshot. A successful autosave
+        // of the server/cached version the user is editing instead (e.g. after
+        // ignoring a recovery prompt while offline) must not destroy work they
+        // have not decided on yet — recovery would otherwise be a race against
+        // the autosave it coexists with.
         setConflict(null);
         clearConflictPending(targetId);
+        if (savedMatchesRecovery(recoveryPendingRef.current, document)) {
+            setRecovery(null);
+            recoveryPendingRef.current = null;
+            void clearRecoveryDraft(userIdRef.current, targetId);
+        }
 
         revisionRef.current = response.data.revision ?? revisionRef.current;
         lastSyncedRef.current = serialized;
@@ -285,6 +330,11 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         inFlightRef.current = true;
         try {
             await performSend(targetId, serialized);
+        } catch (err) {
+            // performSend already reported this save's failure through the
+            // store/UI state; never let it escape as an unhandled rejection
+            // from a `void sendDocument(...)` caller.
+            console.error('Save failed:', err);
         } finally {
             inFlightRef.current = false;
             const queued = queuedRef.current;
@@ -302,6 +352,8 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         baselinePendingRef.current = true;
         cachedForEditorRef.current = null;
         setConflict(null);
+        setRecovery(null);
+        recoveryPendingRef.current = null;
         setSaveStatus('idle');
         setSaveMessage('');
         // Fresh design: persistence starts clean (setDesign also resets it;
@@ -328,6 +380,15 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                 } catch (e) {
                     // unable to resolve current user; continue as anon
                 }
+
+                userIdRef.current = userId;
+                // Read any journalled unsynced work *before* a design is put on
+                // screen: the journal effect below only starts once a design is
+                // set, so reading first guarantees we capture the snapshot
+                // instead of racing the effect's clear. The ref holds it so the
+                // effect leaves it alone until the user decides.
+                const journal = await loadRecoveryDraft(userId, designId);
+                recoveryPendingRef.current = journal;
 
                 const key = `design-editor:${userId}:${designId}`;
 
@@ -431,8 +492,40 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                     }
                 }
 
-                const response = await designApi.getDesign(designId);
+                let response: Awaited<ReturnType<typeof designApi.getDesign>>;
+                try {
+                    response = await designApi.getDesign(designId);
+                } catch (err: any) {
+                    // Reachability failure (offline / server down): if there is
+                    // anything to work with — a warm-cache design on screen or
+                    // a journal snapshot even with an empty cache — offer it and
+                    // keep working locally instead of dead-ending on the error
+                    // screen. 401/404 still surface as errors.
+                    const shown = useEditorStore.getState().design;
+                    if (!err?.response && (shown || journal)) {
+                        if (shouldOfferRecovery(journal, shown)) {
+                            setRecovery(journal);
+                        } else {
+                            recoveryPendingRef.current = null;
+                        }
+                        setSaveStatus('error');
+                        setSaveMessage('Offline — changes are only saved locally.');
+                        return;
+                    }
+                    throw err;
+                }
                 await applyServerFetch(response.data, true);
+
+                // Offer any journalled unsynced work the editor is not already
+                // showing (e.g. the warm cache was evicted before the crash).
+                // Identical content means the load path already restored it, so
+                // the stale entry is dropped rather than prompted for.
+                if (shouldOfferRecovery(journal, useEditorStore.getState().design)) {
+                    setRecovery(journal);
+                } else {
+                    recoveryPendingRef.current = null;
+                    void clearRecoveryDraft(userId, designId);
+                }
             } catch (error: any) {
                 console.error('Failed to load design:', error);
                 if (error.response?.status === 404) {
@@ -509,11 +602,12 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         }, SERVER_SAVE_DEBOUNCE_MS);
     }, [design, designId, sendDocument]);
 
-    // Autosave design to localStorage. Use the same user-scoped key that
-    // `loadDesign` creates so drafts are stored per authenticated user.
+    // Autosave design to localStorage. Use the shared user-id resolver so the
+    // key namespace always matches the journal and the conflict marker — the
+    // load path reads the same key.
     useEffect(() => {
         if (!design) return;
-        const userId = typeof window !== 'undefined' ? (localStorage.getItem('current_user_id') || 'anon') : 'anon';
+        const userId = currentRecoveryUserId();
         const key = `design-editor:${userId}:${designId}`;
         const save = debounce((d: any) => {
             try {
@@ -530,6 +624,43 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
             save.cancel?.();
         };
     }, [design, designId]);
+
+    // Durable unsynced-work journal (IndexedDB). Mirrors the localStorage
+    // cache above but only while the design carries content the server has not
+    // acknowledged — a crash or a failed/interrupted save leaves it behind for
+    // the load path to offer back. Once the content matches the last synced
+    // document the entry is dropped so a clean reload never nags.
+    useEffect(() => {
+        if (!design) return;
+        // The store can briefly hold the previous design while a new designId
+        // loads — never journal a mismatched document.
+        if (design.id && design.id !== designId) return;
+        // A snapshot is awaiting a Restore/Discard decision; leave it untouched
+        // so ignoring the prompt and reloading is non-destructive.
+        if (recoveryPendingRef.current) return;
+
+        const userId = userIdRef.current;
+        const serialized = JSON.stringify(buildCanonicalDocument(design));
+        const unsynced =
+            persistence.isDirty ||
+            (lastSyncedRef.current !== null && serialized !== lastSyncedRef.current);
+
+        if (!unsynced) {
+            // Content is already acknowledged by the server — nothing to recover.
+            void clearRecoveryDraft(userId, designId);
+            return;
+        }
+
+        const save = debounce((d: any) => {
+            void saveRecoveryDraft(userId, designId, d, d?.revision ?? null);
+        }, RECOVERY_DEBOUNCE_MS);
+
+        save(design);
+
+        return () => {
+            save.cancel?.();
+        };
+    }, [design, designId, persistence.isDirty]);
 
     // Manual retry from the status pill: re-serialize and re-send the *current*
     // canonical document. Never re-send a stale payload — newer local edits may
@@ -623,6 +754,73 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
         }
     }, [conflict, persistence.isSaving, designId, clearRetryState]);
 
+    // -- local unsaved recovery ---------------------------------------------
+    //
+    // Work journalled in IndexedDB by an earlier session that the editor is not
+    // already showing. Recovery is explicit: Restore puts the snapshot back on
+    // screen (the normal autosave then pushes it), Discard drops the journal
+    // and keeps the server version.
+
+    const handleRestoreRecovery = useCallback(() => {
+        if (!recovery) return;
+        // Scope by the record's own design id rather than the store, because
+        // the journal can be offered precisely when nothing is on screen yet
+        // (cache evicted + server unreachable) — `isCurrentTarget` would be
+        // false there and the Restore button would silently do nothing.
+        if (recovery.designId && recovery.designId !== designId) return;
+        const restored = normalizeDesign(recovery.design);
+        // Show the snapshot and let the autosave effect treat it as unsynced
+        // (clearing the baseline flag) rather than as freshly loaded server
+        // state, so the recovered work is validated and pushed normally.
+        baselinePendingRef.current = false;
+        cachedForEditorRef.current = restored;
+        recoveryPendingRef.current = null;
+        setRecovery(null);
+        setDesign(restored);
+        // By definition the snapshot is not on the server; mark it unsynced so
+        // the journal keeps it (rather than clearing it as a clean load) and
+        // autosave pushes it as soon as the server is reachable again.
+        useEditorStore.getState().markDirty();
+    }, [recovery, designId, setDesign]);
+
+    const handleDiscardRecovery = useCallback(() => {
+        recoveryPendingRef.current = null;
+        void clearRecoveryDraft(userIdRef.current, designId);
+        setRecovery(null);
+    }, [designId]);
+
+    // Shared recovery prompt, rendered both in the editor and above the loading
+    // spinner: offline with an evicted cache offers the journal before any
+    // design is on screen, so the prompt must be reachable there too.
+    const recoveryBanner = recovery ? (
+        <div
+            role="alert"
+            className="fixed top-3 left-1/2 z-50 max-w-[460px] -translate-x-1/2 rounded-lg bg-amber-50 px-4 py-2 text-xs font-medium text-amber-900 shadow-md ring-1 ring-amber-300"
+        >
+            <span className="inline-flex flex-wrap items-center justify-center gap-2">
+                <span>
+                    Unsaved changes from a previous session were found.
+                </span>
+                <button
+                    type="button"
+                    onClick={handleRestoreRecovery}
+                    title="Load the recovered unsaved changes back into the editor"
+                    className="shrink-0 rounded-full bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-amber-700"
+                >
+                    Restore
+                </button>
+                <button
+                    type="button"
+                    onClick={handleDiscardRecovery}
+                    title="Discard the recovered changes and keep the version saved on the server"
+                    className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-amber-800 ring-1 ring-amber-300 hover:bg-amber-100"
+                >
+                    Discard
+                </button>
+            </span>
+        </div>
+    ) : null;
+
     if (error) {
         return (
             <div className="flex items-center justify-center h-screen">
@@ -644,6 +842,7 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
     if (!design) {
         return (
             <div className="flex items-center justify-center h-screen">
+                {recoveryBanner}
                 <div className="text-center">
                     <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4" />
                     <p className="text-gray-600">Loading design...</p>
@@ -720,6 +919,10 @@ export default function EditorLayout({ designId }: EditorLayoutProps) {
                     )}
                 </div>
             )}
+
+            {/* Local unsaved recovery prompt: unsynced work found in the
+                IndexedDB journal that the editor is not already showing. */}
+            {recoveryBanner}
 
             {/* Toolbar */}
             <EditorToolbar />

@@ -1,0 +1,16 @@
+{
+    "$comment": [
+        "Single source of truth for the canonical design document constraints.",
+        "packages/design-schema/generate.js renders apps/web/utils/documentValidation.ts and",
+        "apps/api/apps/designs/validation.py from this file — do not edit those two by hand.",
+        "",
+        "schemaVersion: the only accepted canonical schema version.",
+        "objectTypes / backgroundTypes MUST stay alphabetically sorted: the generated",
+        "error messages embed the arrays verbatim (JSON.stringify on the client), and",
+        "both sides must produce byte-identical messages."
+    ],
+    "version": 1,
+    "schemaVersion": "1.0",
+    "objectTypes": ["circle", "group", "image", "line", "rectangle", "text"],
+    "backgroundTypes": ["color", "gradient"]
+}

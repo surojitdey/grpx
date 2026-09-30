@@ -1,13 +1,14 @@
 /**
- * Client-side validation of the canonical design document, mirroring
- * apps/api/apps/designs/validation.py so the "Validate" step in the autosave
- * flow rejects the same payloads the server would (same path-style errors),
- * without spending a network round-trip.
+ * Client-side validation of the canonical design document.
  *
- * Object payloads are checked for their envelope + core geometry (id, type,
- * position, size) and the minimal type-specific requirements; type-specific
- * content/style fields round-trip without deep verification, matching the
- * server.
+ * GENERATED FILE — do not edit by hand.
+ * Source: packages/design-schema/schema-spec.json via packages/design-schema/generate.js
+ * Regenerate: node packages/design-schema/generate.js
+ *
+ * Envelope + core geometry checks mirror the server validator exactly (same
+ * path-style issues), so the autosave "Validate" step rejects the same payloads
+ * the server would without a network round trip. Type-specific content/style
+ * fields round-trip without deep verification, matching the server.
  */
 
 export interface DocumentValidationIssue {
@@ -15,8 +16,9 @@ export interface DocumentValidationIssue {
     message: string;
 }
 
-const DESIGN_OBJECT_TYPES = ['circle', 'group', 'image', 'line', 'rectangle', 'text'];
-const BACKGROUND_TYPES = ['color', 'gradient'];
+const DESIGN_OBJECT_TYPES: readonly string[] = ["circle","group","image","line","rectangle","text"];
+const BACKGROUND_TYPES: readonly string[] = ["color","gradient"];
+const SCHEMA_VERSION = "1.0";
 
 const isPlainObject = (v: any) =>
     v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -34,7 +36,7 @@ function validateBackground(background: any, path: string, issues: DocumentValid
         return;
     }
     if (typeof background.type !== 'string' || !BACKGROUND_TYPES.includes(background.type)) {
-        issues.push(issue(`${path}.type`, `background.type must be one of ${JSON.stringify(BACKGROUND_TYPES)}`));
+        issues.push(issue(`${path}.type`, "background.type must be one of [\"color\",\"gradient\"]"));
     }
     if (typeof background.value !== 'string') {
         issues.push(issue(`${path}.value`, 'background.value must be a string'));
@@ -52,7 +54,7 @@ function validateObjectBase(obj: any, path: string, issues: DocumentValidationIs
     }
 
     if (typeof obj.type !== 'string' || !DESIGN_OBJECT_TYPES.includes(obj.type)) {
-        issues.push(issue(`${path}.type`, `object.type must be one of ${JSON.stringify(DESIGN_OBJECT_TYPES)}`));
+        issues.push(issue(`${path}.type`, "object.type must be one of [\"circle\",\"group\",\"image\",\"line\",\"rectangle\",\"text\"]"));
     }
 
     for (const coord of ['x', 'y']) {
@@ -103,7 +105,7 @@ export function validateDocument(document: any): DocumentValidationIssue[] {
         return issues;
     }
 
-    if (document.schemaVersion !== '1.0') {
+    if (document.schemaVersion !== SCHEMA_VERSION) {
         issues.push(issue(`${path}.schemaVersion`, "schemaVersion must be '1.0'"));
     }
 
