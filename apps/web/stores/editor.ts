@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { v4 as uuidv4 } from 'uuid';
 import { Design, DesignPage, DesignObject, User, PersistenceState } from '@/types';
 import { buildCanonicalDocument } from '@/services/api';
 
@@ -63,6 +64,15 @@ interface EditorState {
     updateObject: (id: string, updates: Partial<DesignObject>) => void;
     reorderObject: (id: string, direction: 'up' | 'down' | 'top' | 'bottom') => void;
     duplicateObject: (id: string) => void;
+
+    // Page operations (US-3.14 .. US-3.18). Pages live in the canonical
+    // document, so every change goes through history + the dirty flag and is
+    // persisted by the normal autosave PUT.
+    addPage: (name?: string) => string | null;
+    duplicatePage: (pageId: string) => string | null;
+    deletePage: (pageId: string) => boolean;
+    renamePage: (pageId: string, name: string) => void;
+    movePage: (pageId: string, index: number) => void;
 
     // Text editing actions
     startEditingText: (id: string, initialValue: string) => void;
@@ -375,6 +385,139 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                 persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }),
+
+    // -- page operations (US-3.14 .. US-3.18) --------------------------------
+    //
+    // These mirror the server's /designs/{id}/pages/ endpoints: a new page gets
+    // a stable id, a duplicate regenerates page + object ids (group children
+    // rewritten), a design never drops below one page, names are free-form,
+    // and reordering takes a target index so drag/drop and move-up/down share
+    // one implementation.
+
+    addPage: (name) => {
+        const state = get();
+        if (!state.design) return null;
+        const pageId = `page_${uuidv4()}`;
+        const page = ensurePageDocument({
+            id: pageId,
+            name: (name && name.trim()) || `Page ${state.design.pages.length + 1}`,
+            document: {
+                schemaVersion: '1.0',
+                objects: [],
+                background: { type: 'color', value: '#ffffff' },
+            },
+        });
+        const newDesign = { ...state.design, pages: [...state.design.pages, page] };
+        set({
+            ...addToHistory(state, newDesign),
+            currentPageId: pageId,
+            persistence: { ...state.persistence, isDirty: true, saveError: null },
+        });
+        return pageId;
+    },
+
+    duplicatePage: (pageId) => {
+        const state = get();
+        if (!state.design) return null;
+        const index = state.design.pages.findIndex((p) => p.id === pageId);
+        if (index === -1) return null;
+
+        const source = state.design.pages[index];
+        const sourceDoc = ensurePageDocument(source).document;
+        const idMap: Record<string, string> = {};
+        const objects = (sourceDoc.objects || []).map((obj: any) => {
+            const newId = `obj_${uuidv4()}`;
+            if (typeof obj?.id === 'string') idMap[obj.id] = newId;
+            return { ...(JSON.parse(JSON.stringify(obj ?? {})) as any), id: newId };
+        });
+        // Group children must follow their members to the new ids, or the copy
+        // would reference the source page's objects.
+        const copied = ensurePageDocument({
+            ...(JSON.parse(JSON.stringify(source)) as any),
+            id: `page_${uuidv4()}`,
+            document: {
+                ...sourceDoc,
+                objects: objects.map((obj: any) =>
+                    obj?.type === 'group' && Array.isArray(obj.children)
+                        ? { ...obj, children: obj.children.map((c: string) => idMap[c] ?? c) }
+                        : obj
+                ),
+            },
+        });
+
+        const newDesign = {
+            ...state.design,
+            pages: [
+                ...state.design.pages.slice(0, index + 1),
+                copied,
+                ...state.design.pages.slice(index + 1),
+            ],
+        };
+        set({
+            ...addToHistory(state, newDesign),
+            currentPageId: copied.id,
+            persistence: { ...state.persistence, isDirty: true, saveError: null },
+        });
+        return copied.id;
+    },
+
+    deletePage: (pageId) => {
+        const state = get();
+        if (!state.design) return false;
+        const pages = state.design.pages;
+        const index = pages.findIndex((p) => p.id === pageId);
+        // A design always keeps at least one page (US-3.16), mirroring the API.
+        if (index === -1 || pages.length <= 1) return false;
+
+        const newDesign = { ...state.design, pages: pages.filter((p) => p.id !== pageId) };
+        const patch: Partial<EditorState> = {
+            ...addToHistory(state, newDesign),
+            persistence: { ...state.persistence, isDirty: true, saveError: null },
+        };
+        if (state.currentPageId === pageId) {
+            patch.currentPageId = newDesign.pages[Math.min(index, newDesign.pages.length - 1)].id;
+            patch.selectedObjectIds = [];
+        }
+        set(patch);
+        return true;
+    },
+
+    renamePage: (pageId, name) => {
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        const state = get();
+        if (!state.design) return;
+        if (!state.design.pages.some((p) => p.id === pageId)) return;
+
+        const newDesign = {
+            ...state.design,
+            pages: state.design.pages.map((p) =>
+                p.id === pageId ? { ...p, name: trimmed } : p
+            ),
+        };
+        set({
+            ...addToHistory(state, newDesign),
+            persistence: { ...state.persistence, isDirty: true, saveError: null },
+        });
+    },
+
+    movePage: (pageId, index) => {
+        const state = get();
+        if (!state.design) return;
+        const pages = state.design.pages;
+        const from = pages.findIndex((p) => p.id === pageId);
+        if (from === -1) return;
+
+        const target = Math.max(0, Math.min(index, pages.length - 1));
+        if (target === from) return;
+
+        const reordered = [...pages];
+        reordered.splice(target, 0, reordered.splice(from, 1)[0]);
+        set({
+            ...addToHistory(state, { ...state.design, pages: reordered }),
+            persistence: { ...state.persistence, isDirty: true, saveError: null },
+        });
+    },
 
     undo: () =>
         set((state) => {

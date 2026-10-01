@@ -2,13 +2,17 @@
 Design views and viewsets
 """
 
+import copy
+import uuid
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from .documents import SCHEMA_VERSION, clone_document
+from .documents import SCHEMA_VERSION, clone_document, clone_page
 from .models import Design, DesignVersion
 from .permissions import IsDesignOwner
 from .serializers import (
@@ -18,6 +22,9 @@ from .serializers import (
     DesignListSerializer,
     DesignUpdateSerializer,
     DesignVersionSerializer,
+    PageCreateSerializer,
+    PageMoveSerializer,
+    PageRenameSerializer,
 )
 from .validation import DocumentValidationError, validate_document
 
@@ -25,6 +32,95 @@ from .validation import DocumentValidationError, validate_document
 # without bound. Keep the most recent K versions per design — enough to browse
 # and restore recent milestones — and prune older ones on each save.
 KEEP_VERSIONS = 50
+
+
+class PageNotFound(Exception):
+    """Raised by a page mutator when the design has no page with that id."""
+
+
+def _pages(document):
+    """Return the canonical page list, failing cleanly if the shape is broken."""
+    pages = document.get("pages") if isinstance(document, dict) else None
+    if not isinstance(pages, list) or not pages:
+        raise DocumentValidationError("pages must be a non-empty list", path="document.pages")
+    return pages
+
+
+def _page_index(pages, page_id):
+    """Index of `page_id` in the canonical page list, or raise PageNotFound."""
+    for index, page in enumerate(pages):
+        if isinstance(page, dict) and page.get("id") == page_id:
+            return index
+    raise PageNotFound(page_id)
+
+
+def _persist_document(locked, document, user):
+    """
+    Persist a replacement document on the row-locked design: bump the
+    revision, keep the relational dimensions in sync, record a DesignVersion
+    snapshot and prune history beyond KEEP_VERSIONS.
+
+    Shared by every path that replaces the document (the autosave PUT and the
+    page-management endpoints), so a snapshot is taken and history stays
+    bounded no matter which one performed the write.
+    """
+    locked.document = document
+    locked.revision += 1
+    # Keep the queryable relational dimensions in sync with the
+    # canonical document so later reads/serializations don't revert
+    # document.width/height to stale values.
+    locked.width = document["width"]
+    locked.height = document["height"]
+    locked.save(update_fields=["document", "revision", "width", "height", "updated_at"])
+
+    DesignVersion.objects.create(
+        design=locked,
+        version_number=locked.revision,
+        document=document,
+        created_by=user,
+    )
+
+    # Bound the history so the table tracks save milestones rather than edit
+    # tempo. Done inside the same transaction as the insert: an autosave has
+    # already stored the newest snapshot, so pruning there keeps at most
+    # KEEP_VERSIONS rows after every successful save.
+    stale_ids = list(
+        DesignVersion.objects.filter(design=locked)
+        .order_by("-version_number")
+        .values_list("id", flat=True)[KEEP_VERSIONS:]
+    )
+    if stale_ids:
+        DesignVersion.objects.filter(id__in=stale_ids).delete()
+
+
+def _save_envelope(locked):
+    """Revision metadata every document-writing endpoint returns."""
+    return {
+        "id": str(locked.id),
+        "revision": locked.revision,
+        "schema_version": locked.schema_version,
+        "updated_at": locked.updated_at,
+    }
+
+
+def _client_revision(request):
+    """
+    Optional optimistic-lock revision for a page operation: taken from the
+    JSON body when present, otherwise from `?revision=` (so DELETE, which has
+    no meaningful body, can opt in too). Returns None when the caller did not
+    send one, in which case the mutation applies to the current revision.
+    """
+    value = None
+    if isinstance(request.data, dict) and "revision" in request.data:
+        value = request.data["revision"]
+    elif "revision" in request.query_params:
+        value = request.query_params["revision"]
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValidationError({"revision": ["A valid integer is required."]})
 
 
 def revision_conflict_response(client_revision, server_design):
@@ -232,43 +328,9 @@ class DesignViewSet(viewsets.ModelViewSet):
             # write cannot resurrect a value a concurrent transaction changed
             # between get_object() and the lock. Keeping all reads/writes on one
             # instance makes the serialization guarantee self-evident.
-            locked.document = document
-            locked.revision += 1
-            # Keep the queryable relational dimensions in sync with the
-            # canonical document so later reads/serializations don't revert
-            # document.width/height to stale values.
-            locked.width = document["width"]
-            locked.height = document["height"]
-            locked.save(update_fields=["document", "revision", "width", "height", "updated_at"])
+            _persist_document(locked, document, request.user)
 
-            DesignVersion.objects.create(
-                design=locked,
-                version_number=locked.revision,
-                document=document,
-                created_by=request.user,
-            )
-
-            # Bound the history so the table tracks save milestones rather than
-            # edit tempo. Done inside the same transaction as the insert: an
-            # autosave has already stored the newest snapshot, so pruning there
-            # keeps at most KEEP_VERSIONS rows after every successful save.
-            stale_ids = list(
-                DesignVersion.objects.filter(design=locked)
-                .order_by("-version_number")
-                .values_list("id", flat=True)[KEEP_VERSIONS:]
-            )
-            if stale_ids:
-                DesignVersion.objects.filter(id__in=stale_ids).delete()
-
-        return Response(
-            {
-                "id": str(locked.id),
-                "revision": locked.revision,
-                "schema_version": locked.schema_version,
-                "updated_at": locked.updated_at,
-            },
-            status=status.HTTP_200_OK,
-        )
+        return Response(_save_envelope(locked), status=status.HTTP_200_OK)
 
     @action(
         detail=True,
@@ -285,3 +347,193 @@ class DesignViewSet(viewsets.ModelViewSet):
         versions = design.versions.all()
         serializer = DesignVersionSerializer(versions, many=True)
         return Response(serializer.data)
+
+    # -- page management (US-3.14 .. US-3.18) ---------------------------------
+    #
+    # Structural edits to the canonical `pages` array: add, duplicate, delete,
+    # rename and reorder. They all follow the discipline of PUT /document/: the
+    # mutation runs on the row-locked design, honours an optional client
+    # `revision` (409 when stale), bumps the revision, records a DesignVersion
+    # snapshot, prunes history, and returns the resulting document so the client
+    # can adopt it without a second fetch.
+
+    def _apply_page_change(self, request, design, mutator, client_revision=None):
+        """
+        Run a page mutation under the design row lock and persist the result.
+
+        `mutator(document) -> (document, page_id)` receives a copy of the
+        locked document and returns the updated one plus the affected page id.
+        It may raise PageNotFound (404) or DocumentValidationError (400).
+
+        Returns the success envelope + resulting document + page id, the
+        standard 409, or the mapped error response.
+        """
+        try:
+            with transaction.atomic():
+                # Serialize structural edits the same way saves are serialized:
+                # two concurrent page operations cannot interleave reads and
+                # writes of the pages array.
+                locked = Design.objects.select_for_update().get(pk=design.pk)
+                if client_revision is not None and client_revision != locked.revision:
+                    return revision_conflict_response(client_revision, locked)
+                document, page_id = mutator(copy.deepcopy(locked.document))
+                # The server-built document must satisfy the same canonical
+                # schema a client PUT has to pass.
+                validate_document(document)
+                _persist_document(locked, document, request.user)
+        except PageNotFound:
+            return Response({"detail": "Page not found."}, status=status.HTTP_404_NOT_FOUND)
+        except DocumentValidationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload = _save_envelope(locked)
+        payload["document"] = locked.document
+        payload["page_id"] = page_id
+        return Response(payload, status=status.HTTP_200_OK)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="pages",
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
+    def pages(self, request, pk=None):
+        """
+        Add a page (US-3.14)
+
+        POST /api/v1/designs/{id}/pages/
+
+        Optional body: {"name": "Cover", "revision": 3}. Without a name the
+        page is numbered "Page N".
+        """
+        design = self.get_object()
+        serializer = PageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        name = serializer.validated_data.get("name")
+        client_revision = serializer.validated_data.get("revision")
+
+        def add_page(document):
+            pages = _pages(document)
+            page_id = str(uuid.uuid4())
+            pages.append({"id": page_id, "name": name or f"Page {len(pages) + 1}", "objects": []})
+            return document, page_id
+
+        return self._apply_page_change(request, design, add_page, client_revision)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"pages/(?P<page_id>[^/.]+)/duplicate",
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
+    def duplicate_page(self, request, pk=None, page_id=None):
+        """
+        Duplicate a page (US-3.15)
+
+        POST /api/v1/designs/{id}/pages/{page_id}/duplicate/
+
+        The copy gets a fresh page id and fresh object ids (group `children`
+        rewritten to match), and is inserted directly after the original.
+        """
+        design = self.get_object()
+
+        def duplicate(document):
+            pages = _pages(document)
+            source_index = _page_index(pages, page_id)
+            copied = clone_page(pages[source_index])
+            pages.insert(source_index + 1, copied)
+            return document, copied["id"]
+
+        return self._apply_page_change(request, design, duplicate, _client_revision(request))
+
+    @action(
+        detail=True,
+        methods=["patch", "delete"],
+        url_path=r"pages/(?P<page_id>[^/.]+)",
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
+    def page_detail(self, request, pk=None, page_id=None):
+        """
+        Rename a page (PATCH, US-3.17) or delete one (DELETE, US-3.16)
+
+        PATCH /api/v1/designs/{id}/pages/{page_id}/   {"name": "Summary"}
+        DELETE /api/v1/designs/{id}/pages/{page_id}/[?revision=]
+
+        Names are free-form ("Cover", "Product Details", "Summary"). Deletion
+        refuses to leave a design without a page.
+        """
+        design = self.get_object()
+
+        if request.method == "PATCH":
+            serializer = PageRenameSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            name = serializer.validated_data["name"]
+            client_revision = serializer.validated_data.get("revision")
+
+            def rename(document):
+                pages = _pages(document)
+                pages[_page_index(pages, page_id)]["name"] = name
+                return document, page_id
+
+            return self._apply_page_change(request, design, rename, client_revision)
+
+        # DELETE
+        def delete_page(document):
+            pages = _pages(document)
+            index = _page_index(pages, page_id)
+            if len(pages) <= 1:
+                raise DocumentValidationError(
+                    "a design must keep at least one page",
+                    path="document.pages",
+                )
+            del pages[index]
+            return document, page_id
+
+        return self._apply_page_change(request, design, delete_page, _client_revision(request))
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"pages/(?P<page_id>[^/.]+)/move",
+        permission_classes=[permissions.IsAuthenticated, IsDesignOwner],
+    )
+    def move_page(self, request, pk=None, page_id=None):
+        """
+        Reorder pages (US-3.18)
+
+        POST /api/v1/designs/{id}/pages/{page_id}/move/
+
+        Body takes exactly one of:
+            {"index": 3}          the position a drag/drop gesture landed on
+            {"direction": "up"}   move-up / move-down (also "down")
+        """
+        design = self.get_object()
+        serializer = PageMoveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        index = serializer.validated_data.get("index")
+        direction = serializer.validated_data.get("direction")
+        client_revision = serializer.validated_data.get("revision")
+
+        def move(document):
+            pages = _pages(document)
+            current = _page_index(pages, page_id)
+            if direction == "up":
+                target = current - 1
+                if target < 0:
+                    raise DocumentValidationError("page is already first", path="document.pages")
+            elif direction == "down":
+                target = current + 1
+                if target >= len(pages):
+                    raise DocumentValidationError("page is already last", path="document.pages")
+            else:
+                target = index
+                if target >= len(pages):
+                    raise DocumentValidationError(
+                        f"index {target} is out of range",
+                        path="document.pages",
+                    )
+            if target != current:
+                pages.insert(target, pages.pop(current))
+            return document, page_id
+
+        return self._apply_page_change(request, design, move, client_revision)

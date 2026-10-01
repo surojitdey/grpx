@@ -149,8 +149,11 @@ import { designApi, assetApi, templateApi } from '@/services/api';
 // Load a design
 const design = await designApi.getDesign('design-123');
 
-// Update a page
-await pageApi.updatePage(designId, pageId, document);
+// Rename a page (US-3.17)
+await pageApi.renamePage(designId, pageId, 'Cover');
+
+// Reorder a page (US-3.18): `{ index }` for drag/drop, `{ direction }` for move up/down
+await pageApi.movePage(designId, pageId, { index: 1 });
 
 // Upload an asset
 const uploadUrl = await assetApi.getUploadUrl(filename, contentType);
