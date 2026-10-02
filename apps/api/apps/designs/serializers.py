@@ -119,9 +119,63 @@ class DesignDocumentSerializer(serializers.Serializer):
 
 
 class DesignVersionSerializer(serializers.ModelSerializer):
-    """Serializer for design versions"""
+    """
+    Serializer for design versions
+    """
 
     class Meta:
         model = DesignVersion
         fields = ["id", "version_number", "change_description", "created_by", "created_at"]
         read_only_fields = fields
+
+
+class PageCreateSerializer(serializers.Serializer):
+    """
+    Payload for POST /designs/{id}/pages/
+
+    The page name is optional — the server defaults it to "Page N" — and free
+    form, so names like "Cover" or "Product Details" round-trip unchanged.
+    """
+
+    name = serializers.CharField(required=False, allow_blank=False, max_length=255)
+    revision = serializers.IntegerField(required=False, min_value=1)
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("page name cannot be blank")
+        return value
+
+
+class PageRenameSerializer(serializers.Serializer):
+    """Payload for PATCH /designs/{id}/pages/{page_id}/ (US-3.17)"""
+
+    name = serializers.CharField(required=True, allow_blank=False, max_length=255)
+    revision = serializers.IntegerField(required=False, min_value=1)
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("page name cannot be blank")
+        return value
+
+
+class PageMoveSerializer(serializers.Serializer):
+    """
+    Payload for POST /designs/{id}/pages/{page_id}/move/ (US-3.18)
+
+    Accepts either an explicit target `index` (what a drag/drop gesture ends
+    on) or a relative `direction` (what move-up / move-down buttons send) —
+    exactly one of the two must be present.
+    """
+
+    index = serializers.IntegerField(required=False, min_value=0)
+    direction = serializers.ChoiceField(choices=["up", "down"], required=False)
+    revision = serializers.IntegerField(required=False, min_value=1)
+
+    def validate(self, attrs):
+        has_index = attrs.get("index") is not None
+        has_direction = attrs.get("direction") is not None
+        if has_index == has_direction:
+            raise serializers.ValidationError("Provide exactly one of 'index' or 'direction'.")
+        return attrs

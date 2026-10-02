@@ -346,18 +346,45 @@ export const designApi = {
 };
 
 // Pages API
+// Structural page operations mirror the canonical document endpoints:
+// every call returns { id, revision, schemaVersion, updatedAt, document,
+// pageId } so the caller can adopt the new revision and document without a
+// second fetch. `revision` is optional and enables optimistic locking (409).
 export const pageApi = {
-    createPage: (designId: string) =>
-        client.post(`/designs/${designId}/pages/`, {}),
+    createPage: (designId: string, name?: string, revision?: number) =>
+        client.post(`/designs/${designId}/pages/`, {
+            ...(name ? { name } : {}),
+            ...(revision != null ? { revision } : {}),
+        }),
 
-    updatePage: (designId: string, pageId: string, document: any) =>
-        client.patch(`/designs/${designId}/pages/${pageId}/`, { document }),
+    renamePage: (designId: string, pageId: string, name: string, revision?: number) =>
+        client.patch(`/designs/${designId}/pages/${pageId}/`, {
+            name,
+            ...(revision != null ? { revision } : {}),
+        }),
 
-    deletePage: (designId: string, pageId: string) =>
-        client.delete(`/designs/${designId}/pages/${pageId}/`),
+    deletePage: (designId: string, pageId: string, revision?: number) =>
+        client.delete(`/designs/${designId}/pages/${pageId}/`, {
+            params: revision != null ? { revision } : undefined,
+        }),
 
-    duplicatePage: (designId: string, pageId: string) =>
-        client.post(`/designs/${designId}/pages/${pageId}/duplicate/`, {}),
+    duplicatePage: (designId: string, pageId: string, revision?: number) =>
+        client.post(`/designs/${designId}/pages/${pageId}/duplicate/`, {
+            ...(revision != null ? { revision } : {}),
+        }),
+
+    // Reorder: pass `index` for a drag/drop target, or `direction` for
+    // move-up / move-down.
+    movePage: (
+        designId: string,
+        pageId: string,
+        target: { index?: number; direction?: 'up' | 'down' },
+        revision?: number
+    ) =>
+        client.post(`/designs/${designId}/pages/${pageId}/move/`, {
+            ...target,
+            ...(revision != null ? { revision } : {}),
+        }),
 };
 
 // Asset API
