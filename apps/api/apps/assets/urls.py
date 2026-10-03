@@ -13,14 +13,8 @@ router = SimpleRouter()
 router.register(r'', AssetViewSet, basename='asset')
 
 urlpatterns = [
-    # Custom direct upload endpoint (must come before router patterns)
     path(
-        'direct-upload/',
-        AssetViewSet.as_view({'post': 'direct_upload'}),
-        name='asset-direct-upload',
-    ),
-    path(
-        'upload-url',
+        'upload-url/',
         AssetViewSet.as_view({'post': 'upload_url'}),
         name='asset-upload-url-no-slash',
     ),
