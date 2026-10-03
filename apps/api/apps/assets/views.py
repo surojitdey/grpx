@@ -24,6 +24,12 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
+def _fit_storage_key_filename(owner_id, filename):
+    key_prefix = f'assets/{owner_id}/{uuid.uuid4().hex}/'
+    filename = filename[:255 - len(key_prefix)]
+    return filename, f'{key_prefix}{filename}'
+
+
 class AssetViewSet(viewsets.ModelViewSet):
     """
     Asset management endpoints
@@ -36,8 +42,11 @@ class AssetViewSet(viewsets.ModelViewSet):
     parser_classes = (MultiPartParser, FormParser, JSONParser)
 
     def get_queryset(self):
-        """Only show assets owned by the current user"""
-        return Asset.objects.filter(owner=self.request.user)
+        """Only show ready assets owned by the current user"""
+        return Asset.objects.filter(
+            owner=self.request.user,
+            status='READY',
+        )
 
     def perform_create(self, serializer):
         """Ensure owner is set to current user"""
@@ -62,10 +71,18 @@ class AssetViewSet(viewsets.ModelViewSet):
 
         file = request.FILES['file']
         name = request.POST.get('name', file.name)
+        original_filename = (
+            name.rsplit('/', 1)[-1].rsplit('\\', 1)[-1][:255]
+        )
         filename = get_valid_filename(
             file.name.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
         )
-        key = f'assets/{request.user.id}/{uuid.uuid4().hex}/{filename}'
+        if not filename:
+            return Response(
+                {'detail': 'A valid filename is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        filename, key = _fit_storage_key_filename(request.user.pk, filename)
         storage = get_storage_service()
         uploaded = False
 
@@ -76,11 +93,12 @@ class AssetViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 asset = Asset.objects.create(
                     owner=request.user,
-                    name=name,
-                    asset_type='image',
+                    filename=filename,
+                    original_filename=original_filename,
                     storage_key=key,
                     mime_type=content_type,
-                    file_size=file.size,
+                    size=file.size,
+                    status='READY',
                 )
                 data = self.get_serializer(asset).data
             return Response(data, status=status.HTTP_201_CREATED)
@@ -103,7 +121,7 @@ class AssetViewSet(viewsets.ModelViewSet):
         """
         Get presigned URL for uploading to S3
 
-        POST /api/v1/assets/upload-url/
+        POST /api/v1/assets/upload-url
         {
             "filename": "image.jpg",
             "content_type": "image/jpeg",
@@ -114,20 +132,53 @@ class AssetViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         submitted_filename = serializer.validated_data['filename']
+        original_filename = (
+            submitted_filename.rsplit('/', 1)[-1]
+            .rsplit('\\', 1)[-1]
+        )
         filename = get_valid_filename(
-            submitted_filename.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+            original_filename
         )
-        key = f'assets/{request.user.id}/{uuid.uuid4().hex}/{filename}'
-        upload_url = get_storage_service().generate_presigned_upload_url(
-            key, serializer.validated_data['content_type']
+        if not filename:
+            return Response(
+                {'filename': ['A valid filename is required.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        filename, key = _fit_storage_key_filename(
+            request.user.pk,
+            filename,
         )
+
+        asset = Asset.objects.create(
+            owner=request.user,
+            filename=filename,
+            original_filename=original_filename,
+            mime_type=serializer.validated_data['content_type'],
+            size=serializer.validated_data['file_size'],
+            storage_key=key,
+            status='PENDING',
+        )
+        try:
+            upload_url = get_storage_service().generate_presigned_upload_url(
+                asset.storage_key,
+                asset.mime_type,
+            )
+        except StorageError as exc:
+            asset.status = 'FAILED'
+            asset.save(update_fields=['status', 'updated_at'])
+            return Response(
+                {'detail': f'Upload URL generation failed: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         return Response(
             {
                 'upload_url': upload_url,
-                'storage_key': key,
+                'storage_key': asset.storage_key,
+                'asset_id': str(asset.id),
+                'status': asset.status,
             },
-            status=status.HTTP_200_OK
+            status=status.HTTP_201_CREATED
         )
 
     def perform_destroy(self, instance):
@@ -137,7 +188,7 @@ class AssetViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def complete(self, request):
         """
-        Complete upload and create asset record
+        Complete upload and move its Asset record to READY
 
         POST /api/v1/assets/complete/
         {
@@ -176,18 +227,59 @@ class AssetViewSet(viewsets.ModelViewSet):
                 )
 
             with transaction.atomic():
-                asset, created = Asset.objects.get_or_create(
+                asset = Asset.objects.select_for_update().filter(
                     owner=request.user,
                     storage_key=key,
-                    defaults={
-                        'name': data['name'],
-                        'asset_type': 'image',
-                        'mime_type': data['mime_type'],
-                        'file_size': data['file_size'],
-                        'width': data.get('width'),
-                        'height': data.get('height'),
-                    },
-                )
+                ).first()
+                created = asset is None
+                if asset is None:
+                    filename = get_valid_filename(key.rsplit('/', 1)[-1])
+                    asset = Asset.objects.create(
+                        owner=request.user,
+                        filename=filename,
+                        original_filename=data['name'],
+                        storage_key=key,
+                        mime_type=data['mime_type'],
+                        size=data['file_size'],
+                        width=data.get('width'),
+                        height=data.get('height'),
+                        status='READY',
+                    )
+                else:
+                    if (
+                        asset.mime_type != data['mime_type']
+                        or asset.size != data['file_size']
+                    ):
+                        return Response(
+                            {
+                                'detail': (
+                                    'Upload metadata does not match the '
+                                    'requested asset.'
+                                )
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    if asset.status not in ('PENDING', 'READY'):
+                        return Response(
+                            {
+                                'detail': (
+                                    f'Asset cannot be completed from status '
+                                    f'{asset.status}.'
+                                )
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    asset.width = data.get('width', asset.width)
+                    asset.height = data.get('height', asset.height)
+                    asset.status = 'READY'
+                    asset.save(
+                        update_fields=[
+                            'width',
+                            'height',
+                            'status',
+                            'updated_at',
+                        ]
+                    )
                 response_data = self.get_serializer(asset).data
         except StorageError as exc:
             return Response(

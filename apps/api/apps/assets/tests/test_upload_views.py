@@ -26,7 +26,7 @@ class AssetUploadViewTestCase(APITestCase):
         get_service.return_value = storage
 
         response = self.client.post(
-            '/api/v1/assets/upload-url/',
+            '/api/v1/assets/upload-url',
             {
                 'filename': 'image.png',
                 'content_type': 'image/png',
@@ -35,7 +35,7 @@ class AssetUploadViewTestCase(APITestCase):
             format='json',
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(
             response.data['upload_url'],
             'http://localhost:4566/presigned-upload',
@@ -46,6 +46,90 @@ class AssetUploadViewTestCase(APITestCase):
         self.assertTrue(key.startswith(f'assets/{self.user.pk}/'))
         self.assertTrue(key.endswith('/image.png'))
         self.assertEqual(content_type, 'image/png')
+        asset = Asset.objects.get(pk=response.data['asset_id'])
+        self.assertEqual(asset.owner, self.user)
+        self.assertEqual(asset.filename, 'image.png')
+        self.assertEqual(asset.original_filename, 'image.png')
+        self.assertEqual(asset.mime_type, 'image/png')
+        self.assertEqual(asset.size, 100)
+        self.assertEqual(asset.storage_key, key)
+        self.assertEqual(asset.status, 'PENDING')
+
+    def test_upload_url_rejects_invalid_metadata_without_creating_asset(self):
+        response = self.client.post(
+            '/api/v1/assets/upload-url/',
+            {
+                'filename': 'image.png',
+                'content_type': 'not-a-mime-type',
+                'file_size': 0,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Asset.objects.count(), 0)
+
+    def test_pending_assets_are_not_returned_by_asset_list(self):
+        Asset.objects.create(
+            owner=self.user,
+            filename='image.png',
+            original_filename='image.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{self.user.pk}/upload-id/image.png',
+            status='PENDING',
+        )
+
+        response = self.client.get('/api/v1/assets/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['results'], [])
+
+    @patch('apps.assets.views.get_storage_service')
+    @patch('apps.assets.serializers.get_storage_service')
+    def test_complete_moves_upload_url_asset_from_pending_to_ready(
+        self, get_serializer_service, get_view_service
+    ):
+        storage = Mock()
+        storage.generate_presigned_upload_url.return_value = (
+            'http://localhost:4566/presigned-upload'
+        )
+        storage.generate_presigned_download_url.return_value = (
+            'http://localhost:4566/presigned-download'
+        )
+        storage.exists.return_value = True
+        get_view_service.return_value = storage
+        get_serializer_service.return_value = storage
+
+        upload_response = self.client.post(
+            '/api/v1/assets/upload-url/',
+            {
+                'filename': 'image.png',
+                'content_type': 'image/png',
+                'file_size': 100,
+            },
+            format='json',
+        )
+        asset = Asset.objects.get(pk=upload_response.data['asset_id'])
+        self.assertEqual(asset.status, 'PENDING')
+
+        response = self.client.post(
+            '/api/v1/assets/complete/',
+            {
+                'storage_key': upload_response.data['storage_key'],
+                'name': 'image.png',
+                'mime_type': 'image/png',
+                'file_size': 100,
+                'width': 1920,
+                'height': 1080,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        asset.refresh_from_db()
+        self.assertEqual(asset.status, 'READY')
+        self.assertEqual((asset.width, asset.height), (1920, 1080))
 
     @patch('apps.assets.views.get_storage_service')
     @patch('apps.assets.serializers.get_storage_service')
@@ -80,6 +164,8 @@ class AssetUploadViewTestCase(APITestCase):
         asset = Asset.objects.get(storage_key=key)
         self.assertEqual(asset.owner, self.user)
         self.assertEqual(asset.mime_type, 'image/png')
+        self.assertEqual(asset.size, 100)
+        self.assertEqual(asset.status, 'READY')
 
     @patch('apps.assets.views.get_storage_service')
     def test_complete_rejects_a_missing_object(self, get_service):
