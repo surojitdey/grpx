@@ -46,6 +46,28 @@ class S3StorageService:
         except BotoCoreError as exc:
             raise StorageError('check existence', key, exc) from exc
 
+    def download(self, key: str) -> bytes:
+        try:
+            response = self.client.get_object(
+                Bucket=self.bucket_name,
+                Key=key,
+            )
+            with response['Body'] as body:
+                return body.read()
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError('download', key, exc) from exc
+
+    def put_thumbnail(self, key: str, content: bytes) -> None:
+        try:
+            self.client.put_object(
+                Bucket=self.bucket_name,
+                Key=key,
+                Body=content,
+                ContentType='image/png',
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError('store thumbnail', key, exc) from exc
+
     def generate_presigned_upload_url(
         self, key: str, content_type: str
     ) -> str:

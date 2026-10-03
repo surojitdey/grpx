@@ -58,20 +58,3 @@ class AssetUploadUrlSerializer(serializers.Serializer):
         min_value=1,
         max_value=100 * 1024 * 1024,
     )
-
-
-class AssetCompleteUploadSerializer(serializers.Serializer):
-    """Complete upload and create asset"""
-
-    storage_key = serializers.CharField(max_length=255)
-    name = serializers.CharField(max_length=255)
-    mime_type = serializers.RegexField(
-        regex=MIME_TYPE_PATTERN,
-        max_length=50,
-    )
-    file_size = serializers.IntegerField(
-        min_value=1,
-        max_value=100 * 1024 * 1024,
-    )
-    width = serializers.IntegerField(required=False, min_value=1)
-    height = serializers.IntegerField(required=False, min_value=1)

@@ -398,11 +398,11 @@ export const assetApi = {
     directUpload: async (file: File, name?: string) => {
         const contentType = file.type || 'application/octet-stream';
         const upload = await assetApi.getUploadUrl(
-            file.name,
+            name || file.name,
             contentType,
             file.size,
         );
-        const { upload_url, storage_key } = upload.data;
+        const { upload_url, asset_id } = upload.data;
         const uploadResponse = await fetch(upload_url, {
             method: 'PUT',
             headers: { 'Content-Type': contentType },
@@ -414,15 +414,16 @@ export const assetApi = {
             );
         }
         return assetApi.completeUpload(
-            storage_key,
-            name || file.name,
-            contentType,
-            file.size,
+            asset_id,
         );
     },
 
     getUploadUrl: (filename: string, contentType: string, fileSize: number) =>
-        client.post<{ upload_url: string; storage_key: string }>(
+        client.post<{
+            upload_url: string;
+            storage_key: string;
+            asset_id: string;
+        }>(
             '/assets/upload-url/',
             {
                 filename,
@@ -431,18 +432,10 @@ export const assetApi = {
             }
         ),
 
-    completeUpload: async (
-        storageKey: string,
-        name: string,
-        mimeType: string,
-        fileSize: number,
-    ) => {
-        const response = await client.post<Asset>('/assets/complete/', {
-            storage_key: storageKey,
-            name,
-            mime_type: mimeType,
-            file_size: fileSize,
-        });
+    completeUpload: async (assetId: string) => {
+        const response = await client.post<Asset>(
+            `/assets/${assetId}/complete`,
+        );
         return { ...response, data: transformKeys(response.data) };
     },
 };

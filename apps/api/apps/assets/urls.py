@@ -14,6 +14,11 @@ router.register(r'', AssetViewSet, basename='asset')
 
 urlpatterns = [
     path(
+        '<uuid:pk>/complete',
+        AssetViewSet.as_view({'post': 'complete'}),
+        name='asset-complete-no-slash',
+    ),
+    path(
         'upload-url/',
         AssetViewSet.as_view({'post': 'upload_url'}),
         name='asset-upload-url-no-slash',
