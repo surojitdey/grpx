@@ -17,6 +17,19 @@ class AssetUploadViewTestCase(APITestCase):
         )
         self.client.force_authenticate(user=self.user)
 
+    def test_multipart_proxy_upload_endpoint_is_not_available(self):
+        response = self.client.post(
+            '/api/v1/assets/direct-upload/',
+            {'file': b'large binary payload'},
+            format='json',
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+        self.assertEqual(Asset.objects.count(), 0)
+
     @patch('apps.assets.views.get_storage_service')
     def test_upload_url_returns_a_private_presigned_put_url(self, get_service):
         storage = Mock()
@@ -26,7 +39,7 @@ class AssetUploadViewTestCase(APITestCase):
         get_service.return_value = storage
 
         response = self.client.post(
-            '/api/v1/assets/upload-url',
+            '/api/v1/assets/upload-url/',
             {
                 'filename': 'image.png',
                 'content_type': 'image/png',

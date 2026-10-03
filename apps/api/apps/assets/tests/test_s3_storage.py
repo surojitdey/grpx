@@ -1,4 +1,3 @@
-from io import BytesIO
 from unittest import TestCase
 from unittest.mock import Mock, call, patch
 from urllib.parse import parse_qs, urlparse
@@ -21,17 +20,7 @@ class S3StorageServiceTestCase(TestCase):
             bucket_name='test-assets',
         )
 
-    def test_upload_sends_content_and_type_to_configured_bucket(self):
-        content = BytesIO(b'image-data')
 
-        self.storage.upload('assets/1/image.png', content, 'image/png')
-
-        self.client.put_object.assert_called_once_with(
-            Bucket='test-assets',
-            Key='assets/1/image.png',
-            Body=content,
-            ContentType='image/png',
-        )
 
     def test_delete_removes_the_object_from_configured_bucket(self):
         self.storage.delete('assets/1/image.png')
@@ -136,17 +125,15 @@ class S3StorageServiceTestCase(TestCase):
         )
 
     def test_client_errors_are_exposed_as_storage_errors(self):
-        self.client.put_object.side_effect = ClientError(
+        self.client.delete_object.side_effect = ClientError(
             {'Error': {'Code': 'Unavailable', 'Message': 'S3 is unavailable'}},
-            'PutObject',
+            'DeleteObject',
         )
 
         with self.assertRaises(StorageError) as raised:
-            self.storage.upload(
-                'assets/1/image.png', b'image-data', 'image/png'
-            )
+            self.storage.delete('assets/1/image.png')
 
-        self.assertEqual(raised.exception.operation, 'upload')
+        self.assertEqual(raised.exception.operation, 'delete')
         self.assertEqual(raised.exception.key, 'assets/1/image.png')
 
     @override_settings(

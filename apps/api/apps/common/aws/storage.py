@@ -1,12 +1,8 @@
 from functools import lru_cache
-from typing import BinaryIO, Protocol
+from typing import Protocol
 
 
 class StorageService(Protocol):
-    def upload(
-        self, key: str, content: BinaryIO | bytes, content_type: str
-    ) -> None: ...
-
     def delete(self, key: str) -> None: ...
 
     def exists(self, key: str) -> bool: ...

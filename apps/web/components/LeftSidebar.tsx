@@ -197,7 +197,7 @@ export default function LeftSidebar() {
 
                                     try {
                                         setUploading(true);
-                                        // Upload to backend
+                                        // Upload directly to S3/LocalStack.
                                         const response = await assetApi.directUpload(file, file.name);
                                         const url = response.data.url;
 

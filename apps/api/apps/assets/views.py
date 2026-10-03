@@ -2,14 +2,13 @@
 Asset views
 """
 
-import logging
 import uuid
 
-from django.db import DatabaseError, transaction
+from django.db import transaction
 from django.utils.text import get_valid_filename
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
-from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
 
 from apps.common.aws import StorageError, get_storage_service
@@ -20,8 +19,6 @@ from .serializers import (
     AssetUploadUrlSerializer,
     AssetCompleteUploadSerializer
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _fit_storage_key_filename(owner_id, filename):
@@ -39,7 +36,7 @@ class AssetViewSet(viewsets.ModelViewSet):
 
     serializer_class = AssetSerializer
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = (MultiPartParser, FormParser, JSONParser)
+    parser_classes = (JSONParser,)
 
     def get_queryset(self):
         """Only show ready assets owned by the current user"""
@@ -51,70 +48,6 @@ class AssetViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Ensure owner is set to current user"""
         serializer.save(owner=self.request.user)
-
-    @action(detail=False, methods=['post'])
-    def direct_upload(self, request):
-        """
-        Direct file upload endpoint
-
-        POST /api/v1/assets/direct-upload/
-
-        Form data:
-        - file: Image file
-        - name: Optional asset name
-        """
-        if 'file' not in request.FILES:
-            return Response(
-                {'detail': 'No file provided'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        file = request.FILES['file']
-        name = request.POST.get('name', file.name)
-        original_filename = (
-            name.rsplit('/', 1)[-1].rsplit('\\', 1)[-1][:255]
-        )
-        filename = get_valid_filename(
-            file.name.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
-        )
-        if not filename:
-            return Response(
-                {'detail': 'A valid filename is required.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        filename, key = _fit_storage_key_filename(request.user.pk, filename)
-        storage = get_storage_service()
-        uploaded = False
-
-        try:
-            content_type = file.content_type or 'application/octet-stream'
-            storage.upload(key, file, content_type)
-            uploaded = True
-            with transaction.atomic():
-                asset = Asset.objects.create(
-                    owner=request.user,
-                    filename=filename,
-                    original_filename=original_filename,
-                    storage_key=key,
-                    mime_type=content_type,
-                    size=file.size,
-                    status='READY',
-                )
-                data = self.get_serializer(asset).data
-            return Response(data, status=status.HTTP_201_CREATED)
-        except (StorageError, DatabaseError) as exc:
-            if uploaded:
-                try:
-                    storage.delete(key)
-                except StorageError:
-                    logger.exception(
-                        'Failed to clean up uploaded asset %s',
-                        key,
-                    )
-            return Response(
-                {'detail': f'Upload failed: {exc}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
 
     @action(detail=False, methods=['post'], url_path='upload-url')
     def upload_url(self, request):

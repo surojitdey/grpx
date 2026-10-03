@@ -1,5 +1,3 @@
-from typing import BinaryIO
-
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
@@ -29,19 +27,6 @@ class S3StorageService:
             self.download_client = self.client
         else:
             self.download_client = create_s3_client(external_endpoint)
-
-    def upload(
-        self, key: str, content: BinaryIO | bytes, content_type: str
-    ) -> None:
-        try:
-            self.client.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=content,
-                ContentType=content_type,
-            )
-        except (BotoCoreError, ClientError) as exc:
-            raise StorageError('upload', key, exc) from exc
 
     def delete(self, key: str) -> None:
         try:
