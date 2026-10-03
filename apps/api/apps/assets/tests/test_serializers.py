@@ -1,3 +1,4 @@
+import uuid
 from unittest import mock
 
 from django.test import SimpleTestCase
@@ -15,7 +16,16 @@ class AssetSerializerTestCase(SimpleTestCase):
         )
         download_url = get_service.return_value.generate_presigned_download_url
         download_url.return_value = signed_url
-        asset = Asset(storage_key='assets/1/image.png')
+        asset = Asset(
+            id=uuid.uuid4(),
+            filename='image.png',
+            original_filename='image.png',
+            storage_key='assets/1/image.png',
+            mime_type='image/png',
+            size=100,
+        )
 
-        self.assertEqual(AssetSerializer(asset).data['url'], signed_url)
+        data = AssetSerializer(asset).data
+        self.assertEqual(data['url'], signed_url)
+        self.assertEqual(data['file_size'], 100)
         download_url.assert_called_once_with(asset.storage_key)
