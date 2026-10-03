@@ -92,8 +92,8 @@ services:
       - AWS_REGION=us-east-1
       - AWS_S3_BUCKET=design-platform-assets
       - AWS_S3_EXPORT_BUCKET=design-platform-exports
-      - AWS_S3_INTERNAL_ENDPOINT_URL=http://localstack:4566
-      - AWS_S3_EXTERNAL_ENDPOINT_URL=http://localhost:4566
+      - AWS_INTERNAL_ENDPOINT_URL=http://localstack:4566
+      - AWS_EXTERNAL_ENDPOINT_URL=http://localhost:4566
       - DJANGO_SECRET_KEY=dev-secret-key-change-in-production
       - DJANGO_DEBUG=True
       - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,api
@@ -131,8 +131,8 @@ services:
       - AWS_REGION=us-east-1
       - AWS_S3_BUCKET=design-platform-assets
       - AWS_S3_EXPORT_BUCKET=design-platform-exports
-      - AWS_S3_INTERNAL_ENDPOINT_URL=http://localstack:4566
-      - AWS_S3_EXTERNAL_ENDPOINT_URL=http://localhost:4566
+      - AWS_INTERNAL_ENDPOINT_URL=http://localstack:4566
+      - AWS_EXTERNAL_ENDPOINT_URL=http://localhost:4566
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - DJANGO_SECRET_KEY=dev-secret-key-change-in-production

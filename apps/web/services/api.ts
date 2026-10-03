@@ -396,24 +396,55 @@ export const assetApi = {
     deleteAsset: (id: string) => client.delete(`/assets/${id}/`),
 
     directUpload: async (file: File, name?: string) => {
-        const formData = new FormData();
-        formData.append('file', file);
-        if (name) {
-            formData.append('name', name);
+        const contentType = file.type || 'application/octet-stream';
+        const upload = await assetApi.getUploadUrl(
+            file.name,
+            contentType,
+            file.size,
+        );
+        const { upload_url, storage_key } = upload.data;
+        const uploadResponse = await fetch(upload_url, {
+            method: 'PUT',
+            headers: { 'Content-Type': contentType },
+            body: file,
+        });
+        if (!uploadResponse.ok) {
+            throw new Error(
+                `S3 upload failed (${uploadResponse.status} ${uploadResponse.statusText})`
+            );
         }
-
-        // Don't override Content-Type - let axios set it with proper boundary
-        // The request interceptor will add Authorization header automatically
-        const response = await client.post<Asset>('/assets/direct-upload/', formData);
-        const data = transformKeys(response.data);
-        return { ...response, data };
+        return assetApi.completeUpload(
+            storage_key,
+            name || file.name,
+            contentType,
+            file.size,
+        );
     },
 
-    getUploadUrl: (filename: string, contentType: string) =>
-        client.post('/assets/upload-url/', { filename, contentType }),
+    getUploadUrl: (filename: string, contentType: string, fileSize: number) =>
+        client.post<{ upload_url: string; storage_key: string }>(
+            '/assets/upload-url/',
+            {
+                filename,
+                content_type: contentType,
+                file_size: fileSize,
+            }
+        ),
 
-    completeUpload: (key: string, etag: string) =>
-        client.post('/assets/complete/', { key, etag }),
+    completeUpload: async (
+        storageKey: string,
+        name: string,
+        mimeType: string,
+        fileSize: number,
+    ) => {
+        const response = await client.post<Asset>('/assets/complete/', {
+            storage_key: storageKey,
+            name,
+            mime_type: mimeType,
+            file_size: fileSize,
+        });
+        return { ...response, data: transformKeys(response.data) };
+    },
 };
 
 // Template API

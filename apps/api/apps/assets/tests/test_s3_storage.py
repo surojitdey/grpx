@@ -1,11 +1,13 @@
 from io import BytesIO
 from unittest import TestCase
 from unittest.mock import Mock, call, patch
+from urllib.parse import parse_qs, urlparse
 
 from botocore.exceptions import ClientError
 from django.test import override_settings
 
 from apps.common.aws.exceptions import StorageError
+from apps.common.aws.clients import create_s3_client
 from apps.common.aws.s3 import S3StorageService
 
 
@@ -38,6 +40,62 @@ class S3StorageServiceTestCase(TestCase):
             Bucket='test-assets',
             Key='assets/1/image.png',
         )
+
+    def test_exists_checks_the_configured_bucket(self):
+        self.assertTrue(self.storage.exists('assets/1/image.png'))
+
+        self.client.head_object.assert_called_once_with(
+            Bucket='test-assets',
+            Key='assets/1/image.png',
+        )
+
+    def test_exists_returns_false_for_a_missing_object(self):
+        self.client.head_object.side_effect = ClientError(
+            {'Error': {'Code': '404', 'Message': 'Not Found'}},
+            'HeadObject',
+        )
+
+        self.assertFalse(self.storage.exists('assets/1/missing.png'))
+
+    @patch('apps.common.aws.clients.boto3.client')
+    def test_custom_endpoints_use_path_style_addressing(self, boto_client):
+        create_s3_client('http://localhost:4566')
+
+        config = boto_client.call_args.kwargs['config']
+        self.assertEqual(config.s3['addressing_style'], 'path')
+
+    @patch('apps.common.aws.clients.boto3.client')
+    def test_aws_client_uses_default_endpoint_addressing(self, boto_client):
+        create_s3_client()
+
+        config = boto_client.call_args.kwargs['config']
+        self.assertIsNone(config.s3)
+        self.assertNotIn('endpoint_url', boto_client.call_args.kwargs)
+
+    @override_settings(
+        AWS_ACCESS_KEY_ID='test',
+        AWS_SECRET_ACCESS_KEY='test',
+        AWS_REGION='us-east-1',
+        AWS_S3_BUCKET='design-platform-assets',
+        AWS_S3_INTERNAL_ENDPOINT_URL='http://localstack:4566',
+        AWS_S3_EXTERNAL_ENDPOINT_URL='http://localhost:4566',
+    )
+    def test_localstack_presigned_urls_use_the_browser_endpoint(self):
+        storage = S3StorageService()
+        key = 'assets/1/upload-id/image.png'
+
+        upload = urlparse(
+            storage.generate_presigned_upload_url(key, 'image/png')
+        )
+        download = urlparse(storage.generate_presigned_download_url(key))
+
+        for parsed in (upload, download):
+            self.assertEqual(parsed.netloc, 'localhost:4566')
+            self.assertEqual(
+                parsed.path,
+                f'/design-platform-assets/{key}',
+            )
+            self.assertIn('X-Amz-Signature', parse_qs(parsed.query))
 
     def test_presigned_urls_use_download_client_and_requested_parameters(self):
         self.download_client.generate_presigned_url.side_effect = [

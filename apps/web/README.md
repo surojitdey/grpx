@@ -155,8 +155,8 @@ await pageApi.renamePage(designId, pageId, 'Cover');
 // Reorder a page (US-3.18): `{ index }` for drag/drop, `{ direction }` for move up/down
 await pageApi.movePage(designId, pageId, { index: 1 });
 
-// Upload an asset
-const uploadUrl = await assetApi.getUploadUrl(filename, contentType);
+// Upload an asset using a presigned S3 PUT, then register it with the API
+const asset = await assetApi.directUpload(file);
 ```
 
 ## Styling

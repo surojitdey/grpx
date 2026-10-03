@@ -34,9 +34,26 @@ export function PropertiesPanel() {
         draggedObjectPosition?.id === selectedObject.id
             ? draggedObjectPosition
             : selectedObject;
+    const dimensions =
+        draggedObjectPosition?.id === selectedObject.id
+            ? draggedObjectPosition
+            : {
+                  width:
+                      selectedObject.width * Math.abs(selectedObject.scaleX || 1),
+                  height:
+                      selectedObject.height * Math.abs(selectedObject.scaleY || 1),
+              };
 
     const handlePropertyChange = (key: string, value: any) => {
         if (typeof value === 'number' && !Number.isFinite(value)) return;
+        if (key === 'width' || key === 'height') {
+            const scale =
+                key === 'width' ? selectedObject.scaleX : selectedObject.scaleY;
+            updateObject(selectedObjectIds[0], {
+                [key]: value / Math.abs(scale || 1),
+            });
+            return;
+        }
         updateObject(selectedObjectIds[0], { [key]: value });
     };
 
@@ -78,7 +95,7 @@ export function PropertiesPanel() {
                     <label className="form-label">Width</label>
                     <input
                         type="number"
-                        value={selectedObject.width}
+                        value={dimensions.width ?? selectedObject.width}
                         onChange={(e) => handlePropertyChange('width', parseFloat(e.target.value))}
                         className="form-input text-sm"
                     />
@@ -87,7 +104,7 @@ export function PropertiesPanel() {
                     <label className="form-label">Height</label>
                     <input
                         type="number"
-                        value={selectedObject.height}
+                        value={dimensions.height ?? selectedObject.height}
                         onChange={(e) => handlePropertyChange('height', parseFloat(e.target.value))}
                         className="form-input text-sm"
                     />

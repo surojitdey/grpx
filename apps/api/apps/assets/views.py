@@ -9,7 +9,7 @@ from django.db import DatabaseError, transaction
 from django.utils.text import get_valid_filename
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.common.aws import StorageError, get_storage_service
@@ -33,7 +33,7 @@ class AssetViewSet(viewsets.ModelViewSet):
 
     serializer_class = AssetSerializer
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = (MultiPartParser, FormParser)
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
 
     def get_queryset(self):
         """Only show assets owned by the current user"""
@@ -98,7 +98,7 @@ class AssetViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='upload-url')
     def upload_url(self, request):
         """
         Get presigned URL for uploading to S3
@@ -151,10 +151,54 @@ class AssetViewSet(viewsets.ModelViewSet):
         """
         serializer = AssetCompleteUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        key = data['storage_key']
+        if not key.startswith(f'assets/{request.user.pk}/'):
+            return Response(
+                {
+                    'detail': (
+                        'The uploaded object does not belong to this user.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # TODO: Create asset from S3 file
+        storage = get_storage_service()
+        try:
+            if not storage.exists(key):
+                return Response(
+                    {
+                        'detail': (
+                            'The uploaded object was not found in storage.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
+            with transaction.atomic():
+                asset, created = Asset.objects.get_or_create(
+                    owner=request.user,
+                    storage_key=key,
+                    defaults={
+                        'name': data['name'],
+                        'asset_type': 'image',
+                        'mime_type': data['mime_type'],
+                        'file_size': data['file_size'],
+                        'width': data.get('width'),
+                        'height': data.get('height'),
+                    },
+                )
+                response_data = self.get_serializer(asset).data
+        except StorageError as exc:
+            return Response(
+                {'detail': f'Upload completion failed: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         return Response(
-            {'detail': 'Upload completed'},
-            status=status.HTTP_201_CREATED
+            response_data,
+            status=(
+                status.HTTP_201_CREATED
+                if created
+                else status.HTTP_200_OK
+            ),
         )
