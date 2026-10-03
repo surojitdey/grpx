@@ -21,8 +21,6 @@ class S3StorageServiceTestCase(TestCase):
             bucket_name='test-assets',
         )
 
-
-
     def test_delete_removes_the_object_from_configured_bucket(self):
         self.storage.delete('assets/1/image.png')
 
@@ -69,6 +67,30 @@ class S3StorageServiceTestCase(TestCase):
         )
 
         self.assertFalse(self.storage.exists('assets/1/missing.png'))
+
+    def test_get_object_metadata_returns_size_and_content_type(self):
+        self.client.head_object.return_value = {
+            'ContentLength': 100,
+            'ContentType': 'image/png',
+        }
+
+        metadata = self.storage.get_object_metadata('assets/1/image.png')
+
+        self.assertEqual(metadata, (100, 'image/png'))
+        self.client.head_object.assert_called_once_with(
+            Bucket='test-assets',
+            Key='assets/1/image.png',
+        )
+
+    def test_get_object_metadata_returns_none_for_missing_object(self):
+        self.client.head_object.side_effect = ClientError(
+            {'Error': {'Code': '404', 'Message': 'Not Found'}},
+            'HeadObject',
+        )
+
+        self.assertIsNone(
+            self.storage.get_object_metadata('assets/1/missing.png')
+        )
 
     @patch('apps.common.aws.clients.boto3.client')
     def test_custom_endpoints_use_path_style_addressing(self, boto_client):

@@ -8,6 +8,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from apps.common.aws import StorageError, get_storage_service
 
 from .models import Asset
+from .validation import validate_image_content
 
 
 @shared_task
@@ -24,7 +25,19 @@ def process_asset(asset_id: str) -> None:
         if asset.mime_type.startswith('image/'):
             storage = get_storage_service()
             original = storage.download(asset.storage_key)
+            with Image.open(BytesIO(original)) as probe:
+                validate_image_content(
+                    asset.original_filename,
+                    asset.mime_type,
+                    probe.format,
+                    probe.width,
+                    probe.height,
+                    len(original),
+                    asset.size,
+                )
+                probe.verify()
             with Image.open(BytesIO(original)) as source:
+                source.load()
                 image = ImageOps.exif_transpose(source)
                 width, height = image.size
                 image.thumbnail((512, 512))

@@ -159,6 +159,10 @@ await pageApi.movePage(designId, pageId, { index: 1 });
 const asset = await assetApi.directUpload(file);
 ```
 
+Asset uploads accept JPEG, PNG, WebP, and GIF files up to 100 MiB. The
+background processor verifies the actual image format and rejects images
+larger than 16,384 pixels on either side or 80 megapixels total.
+
 ## Styling
 
 Uses Tailwind CSS with custom global styles for:
