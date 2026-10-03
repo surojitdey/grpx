@@ -65,18 +65,19 @@ function createFabricObject(obj: any): any | null {
 export default function Canvas() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const fabricCanvasRef = useRef<any | null>(null);
-    const {
-        design,
-        currentPageId,
-        zoom,
-        panX,
-        panY,
-        selectedObjectIds,
-        setSelectedObjects,
-        activeTool,
-        addObject,
-        setActiveTool,
-    } = useEditorStore();
+    const design = useEditorStore((state) => state.design);
+    const currentPageId = useEditorStore((state) => state.currentPageId);
+    const zoom = useEditorStore((state) => state.zoom);
+    const panX = useEditorStore((state) => state.panX);
+    const panY = useEditorStore((state) => state.panY);
+    const setSelectedObjects = useEditorStore((state) => state.setSelectedObjects);
+    const setDraggedObjectPosition = useEditorStore(
+        (state) => state.setDraggedObjectPosition
+    );
+    const updateObject = useEditorStore((state) => state.updateObject);
+    const activeTool = useEditorStore((state) => state.activeTool);
+    const addObject = useEditorStore((state) => state.addObject);
+    const setActiveTool = useEditorStore((state) => state.setActiveTool);
 
     useEffect(() => {
         if (!canvasRef.current || !design) return;
@@ -94,6 +95,17 @@ export default function Canvas() {
         // Track whether this effect's canvas is still "alive" so async callbacks
         // (like image loaders) don't mutate a disposed or recreated canvas.
         let effectAlive = true;
+        let pendingDraggedPosition: { id: string; x: number; y: number } | null =
+            null;
+        let draggedPositionFrame: number | null = null;
+
+        const cancelDraggedPositionUpdate = () => {
+            if (draggedPositionFrame !== null) {
+                cancelAnimationFrame(draggedPositionFrame);
+                draggedPositionFrame = null;
+            }
+            pendingDraggedPosition = null;
+        };
 
         // Load objects from current page
         const currentPage = design.pages.find((p) => p.id === currentPageId);
@@ -263,7 +275,70 @@ export default function Canvas() {
 
         fabricCanvas.on('selection:created', handleSelection);
         fabricCanvas.on('selection:updated', handleSelection);
-        fabricCanvas.on('selection:cleared', () => setSelectedObjects([]));
+        const handleSelectionCleared = () => {
+            cancelDraggedPositionUpdate();
+            setSelectedObjects([]);
+        };
+        fabricCanvas.on('selection:cleared', handleSelectionCleared);
+
+        const handleObjectMoving = (event: any) => {
+            const target = event.target;
+            if (
+                !target?.objId ||
+                typeof target.left !== 'number' ||
+                typeof target.top !== 'number'
+            ) {
+                return;
+            }
+            pendingDraggedPosition = {
+                id: target.objId,
+                x: target.left,
+                y: target.top,
+            };
+            if (draggedPositionFrame !== null) return;
+
+            // Limit sidebar updates to display refreshes, not every pointer event.
+            draggedPositionFrame = requestAnimationFrame(() => {
+                draggedPositionFrame = null;
+                if (effectAlive && pendingDraggedPosition) {
+                    setDraggedObjectPosition(pendingDraggedPosition);
+                }
+            });
+        };
+
+        const handleObjectModified = (event: any) => {
+            const target = event.target;
+            if (
+                !target?.objId ||
+                typeof target.left !== 'number' ||
+                typeof target.top !== 'number'
+            ) {
+                return;
+            }
+            cancelDraggedPositionUpdate();
+            const state = useEditorStore.getState();
+            const page = state.design?.pages.find(
+                (item) => item.id === state.currentPageId
+            );
+            const object = page?.document.objects.find(
+                (item) => item.id === target.objId
+            );
+            if (object?.type === 'text' && typeof target.text === 'string') {
+                updateObject(target.objId, {
+                    x: target.left,
+                    y: target.top,
+                    content: { ...object.content, text: target.text },
+                });
+                return;
+            }
+            updateObject(target.objId, {
+                x: target.left,
+                y: target.top,
+            });
+        };
+
+        fabricCanvas.on('object:moving', handleObjectMoving);
+        fabricCanvas.on('object:modified', handleObjectModified);
 
         // Handle adding objects when a tool is active
         const handlePointerDown = (opt: any) => {
@@ -307,13 +382,28 @@ export default function Canvas() {
             // mark this effect as dead so any pending async callbacks won't touch
             // the disposed canvas instance
             effectAlive = false;
+            cancelDraggedPositionUpdate();
             fabricCanvas.off('selection:created', handleSelection);
             fabricCanvas.off('selection:updated', handleSelection);
-            fabricCanvas.off('selection:cleared');
+            fabricCanvas.off('selection:cleared', handleSelectionCleared);
+            fabricCanvas.off('object:moving', handleObjectMoving);
+            fabricCanvas.off('object:modified', handleObjectModified);
             fabricCanvas.off('mouse:down', handlePointerDown);
             fabricCanvas.dispose();
         };
-    }, [design, currentPageId, zoom, panX, panY, activeTool, addObject, setActiveTool, setSelectedObjects]);
+    }, [
+        design,
+        currentPageId,
+        zoom,
+        panX,
+        panY,
+        activeTool,
+        addObject,
+        setActiveTool,
+        setSelectedObjects,
+        setDraggedObjectPosition,
+        updateObject,
+    ]);
 
     // Sync property changes to fabric canvas
     useEffect(() => {

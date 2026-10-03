@@ -11,6 +11,7 @@ interface EditorState {
     // UI state
     activeTool: 'select' | 'text' | 'rectangle' | 'circle' | 'line' | 'image';
     selectedObjectIds: string[];
+    draggedObjectPosition: { id: string; x: number; y: number } | null;
     zoom: number;
     panX: number;
     panY: number;
@@ -42,6 +43,9 @@ interface EditorState {
     setCurrentPage: (pageId: string) => void;
     setActiveTool: (tool: string) => void;
     setSelectedObjects: (ids: string[]) => void;
+    setDraggedObjectPosition: (
+        position: { id: string; x: number; y: number } | null
+    ) => void;
     addSelectedObject: (id: string) => void;
     removeSelectedObject: (id: string) => void;
     clearSelection: () => void;
@@ -150,6 +154,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     currentPageId: null,
     activeTool: 'select',
     selectedObjectIds: [],
+    draggedObjectPosition: null,
     zoom: 100,
     panX: 0,
     panY: 0,
@@ -173,6 +178,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                 pages: (design.pages || []).map(ensurePageDocument),
             } : null,
             currentPageId: design?.pages?.[0]?.id || null,
+            draggedObjectPosition: null,
             // Reset history when loading a new design so undo/redo applies to the
             // newly loaded document only. Seed initial snapshot for undo.
             history: design ? [JSON.parse(JSON.stringify({
@@ -186,11 +192,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             persistence: { ...INITIAL_PERSISTENCE },
         }),
 
-    setCurrentPage: (pageId) => set({ currentPageId: pageId }),
+    setCurrentPage: (pageId) =>
+        set({ currentPageId: pageId, draggedObjectPosition: null }),
 
     setActiveTool: (tool) => set({ activeTool: tool as any }),
 
-    setSelectedObjects: (ids) => set({ selectedObjectIds: ids }),
+    setSelectedObjects: (ids) =>
+        set({ selectedObjectIds: ids, draggedObjectPosition: null }),
+
+    setDraggedObjectPosition: (position) =>
+        set({ draggedObjectPosition: position }),
 
     addSelectedObject: (id) =>
         set((state) => ({
@@ -202,7 +213,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             selectedObjectIds: state.selectedObjectIds.filter((sid) => sid !== id),
         })),
 
-    clearSelection: () => set({ selectedObjectIds: [] }),
+    clearSelection: () =>
+        set({ selectedObjectIds: [], draggedObjectPosition: null }),
 
     setZoom: (zoom) => set({ zoom: Math.max(10, Math.min(500, zoom)) }),
 
@@ -269,6 +281,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             return {
                 ...addToHistory(state, newDesign),
                 selectedObjectIds: state.selectedObjectIds.filter((sid) => sid !== id),
+                draggedObjectPosition:
+                    state.draggedObjectPosition?.id === id
+                        ? null
+                        : state.draggedObjectPosition,
                 persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }),
@@ -296,6 +312,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             } as any;
             return {
                 ...addToHistory(state, newDesign),
+                draggedObjectPosition: null,
                 persistence: { ...state.persistence, isDirty: true, saveError: null },
             };
         }) as any,

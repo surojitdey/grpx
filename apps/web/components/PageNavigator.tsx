@@ -19,16 +19,14 @@ const controlClass =
     'rounded p-0.5 text-gray-400 transition-opacity opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:text-gray-700 disabled:opacity-0 disabled:hover:text-gray-400';
 
 export default function PageNavigator() {
-    const {
-        design,
-        currentPageId,
-        setCurrentPage,
-        addPage,
-        duplicatePage,
-        deletePage,
-        renamePage,
-        movePage,
-    } = useEditorStore();
+    const design = useEditorStore((state) => state.design);
+    const currentPageId = useEditorStore((state) => state.currentPageId);
+    const setCurrentPage = useEditorStore((state) => state.setCurrentPage);
+    const addPage = useEditorStore((state) => state.addPage);
+    const duplicatePage = useEditorStore((state) => state.duplicatePage);
+    const deletePage = useEditorStore((state) => state.deletePage);
+    const renamePage = useEditorStore((state) => state.renamePage);
+    const movePage = useEditorStore((state) => state.movePage);
 
     // Inline rename target: `original` lets a cancelled/unchanged edit avoid
     // pushing a pointless history entry.

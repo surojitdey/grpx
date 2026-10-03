@@ -14,7 +14,8 @@ import {
 } from '@heroicons/react/24/outline';
 
 export default function EditorToolbar() {
-    const { zoom, setZoom } = useEditorStore();
+    const zoom = useEditorStore((state) => state.zoom);
+    const setZoom = useEditorStore((state) => state.setZoom);
 
     return (
         <div className="toolbar">

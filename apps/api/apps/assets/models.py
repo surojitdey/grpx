@@ -26,7 +26,6 @@ class Asset(models.Model):
     
     # S3 storage
     storage_key = models.CharField(max_length=255, unique=True)
-    url = models.URLField()
     thumbnail_url = models.URLField(blank=True, default='')
     
     # File info

@@ -1,4 +1,32 @@
 services:
+  # LocalStack — local AWS (S3, SQS, Secrets Manager, STS). S3 is required
+  # by the design platform; the other services are prepared for later use.
+  #
+  # The unified LocalStack image now requires a valid LOCALSTACK_AUTH_TOKEN
+  # even for the free tier. When that token is not available, the service
+  # will not start and the buckets must be created another way (or the
+  # project should use a different free S3-compatible emulator).
+  localstack:
+    image: localstack/localstack:latest
+    container_name: design-platform-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sqs,secretsmanager,sts
+      - PERSISTENCE=1
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN:-}
+    volumes:
+      - localstack_data:/var/lib/localstack
+      # Creates design-platform-assets / design-platform-exports and sets
+      # their CORS rules once S3 is ready (ready.d hook).
+      - ./infrastructure/localstack/init:/etc/localstack/init/ready.d
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal s3api head-bucket --bucket design-platform-assets >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   # PostgreSQL Database
   postgres:
     image: postgres:15-alpine
@@ -59,6 +87,13 @@ services:
       - DB_HOST=postgres
       - DB_PASSWORD=design_password
       - REDIS_URL=redis://redis:6379/0
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - AWS_S3_BUCKET=design-platform-assets
+      - AWS_S3_EXPORT_BUCKET=design-platform-exports
+      - AWS_S3_INTERNAL_ENDPOINT_URL=http://localstack:4566
+      - AWS_S3_EXTERNAL_ENDPOINT_URL=http://localhost:4566
       - DJANGO_SECRET_KEY=dev-secret-key-change-in-production
       - DJANGO_DEBUG=True
       - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,api
@@ -70,6 +105,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      localstack:
         condition: service_healthy
     volumes:
       - ./apps/api:/app/api
@@ -89,6 +126,13 @@ services:
       - DB_HOST=postgres
       - DB_PASSWORD=design_password
       - REDIS_URL=redis://redis:6379/0
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - AWS_S3_BUCKET=design-platform-assets
+      - AWS_S3_EXPORT_BUCKET=design-platform-exports
+      - AWS_S3_INTERNAL_ENDPOINT_URL=http://localstack:4566
+      - AWS_S3_EXTERNAL_ENDPOINT_URL=http://localhost:4566
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - DJANGO_SECRET_KEY=dev-secret-key-change-in-production
@@ -96,6 +140,7 @@ services:
       - postgres
       - redis
       - api
+      - localstack
     volumes:
       - ./apps/api:/app/api
       - ./packages/design-schema:/app/design-schema
@@ -121,6 +166,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  localstack_data:
 
 networks:
   default:
