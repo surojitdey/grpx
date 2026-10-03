@@ -5,7 +5,15 @@ import cn from 'classnames';
 import { ChevronUpIcon, ChevronDownIcon, EyeIcon, EyeSlashIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline';
 
 export function PropertiesPanel() {
-    const { selectedObjectIds, design, currentPageId, updateObject, removeObject, duplicateObject } = useEditorStore();
+    const selectedObjectIds = useEditorStore((state) => state.selectedObjectIds);
+    const draggedObjectPosition = useEditorStore(
+        (state) => state.draggedObjectPosition
+    );
+    const design = useEditorStore((state) => state.design);
+    const currentPageId = useEditorStore((state) => state.currentPageId);
+    const updateObject = useEditorStore((state) => state.updateObject);
+    const removeObject = useEditorStore((state) => state.removeObject);
+    const duplicateObject = useEditorStore((state) => state.duplicateObject);
 
     if (selectedObjectIds.length === 0) {
         return (
@@ -21,6 +29,11 @@ export function PropertiesPanel() {
     );
 
     if (!selectedObject) return null;
+
+    const position =
+        draggedObjectPosition?.id === selectedObject.id
+            ? draggedObjectPosition
+            : selectedObject;
 
     const handlePropertyChange = (key: string, value: any) => {
         if (typeof value === 'number' && !Number.isFinite(value)) return;
@@ -44,7 +57,7 @@ export function PropertiesPanel() {
                     <label className="form-label">X</label>
                     <input
                         type="number"
-                        value={selectedObject.x}
+                        value={position.x}
                         onChange={(e) => handlePropertyChange('x', parseFloat(e.target.value))}
                         className="form-input text-sm"
                     />
@@ -53,7 +66,7 @@ export function PropertiesPanel() {
                     <label className="form-label">Y</label>
                     <input
                         type="number"
-                        value={selectedObject.y}
+                        value={position.y}
                         onChange={(e) => handlePropertyChange('y', parseFloat(e.target.value))}
                         className="form-input text-sm"
                     />
@@ -270,7 +283,12 @@ export function PropertiesPanel() {
 }
 
 export function LayersPanel() {
-    const { design, currentPageId, selectedObjectIds, setSelectedObjects, updateObject, reorderObject } = useEditorStore();
+    const design = useEditorStore((state) => state.design);
+    const currentPageId = useEditorStore((state) => state.currentPageId);
+    const selectedObjectIds = useEditorStore((state) => state.selectedObjectIds);
+    const setSelectedObjects = useEditorStore((state) => state.setSelectedObjects);
+    const updateObject = useEditorStore((state) => state.updateObject);
+    const reorderObject = useEditorStore((state) => state.reorderObject);
 
     const currentPage = design?.pages.find((p) => p.id === currentPageId);
     const objects = currentPage?.document.objects || [];
@@ -361,7 +379,9 @@ export function LayersPanel() {
 }
 
 export default function RightSidebar() {
-    const { activeRightPanel, setActiveRightPanel, rightSidebarOpen } = useEditorStore();
+    const activeRightPanel = useEditorStore((state) => state.activeRightPanel);
+    const setActiveRightPanel = useEditorStore((state) => state.setActiveRightPanel);
+    const rightSidebarOpen = useEditorStore((state) => state.rightSidebarOpen);
 
     if (!rightSidebarOpen) return null;
 

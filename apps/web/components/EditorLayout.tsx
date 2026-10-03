@@ -81,7 +81,8 @@ function formatSavedAt(at: Date | null): string {
 }
 
 export default function EditorLayout({ designId }: EditorLayoutProps) {
-    const { design, setDesign } = useEditorStore();
+    const design = useEditorStore((state) => state.design);
+    const setDesign = useEditorStore((state) => state.setDesign);
     const persistence = useEditorStore((state) => state.persistence);
     const [error, setError] = useState<string | null>(null);
     const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');

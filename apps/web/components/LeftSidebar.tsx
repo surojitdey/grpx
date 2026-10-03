@@ -59,14 +59,12 @@ const mockTemplates: TemplateItemProps[] = [
 ];
 
 export default function LeftSidebar() {
-    const {
-        activeLeftPanel,
-        setActiveLeftPanel,
-        activeTool,
-        setActiveTool,
-        leftSidebarOpen,
-        addObject,
-    } = useEditorStore();
+    const activeLeftPanel = useEditorStore((state) => state.activeLeftPanel);
+    const setActiveLeftPanel = useEditorStore((state) => state.setActiveLeftPanel);
+    const activeTool = useEditorStore((state) => state.activeTool);
+    const setActiveTool = useEditorStore((state) => state.setActiveTool);
+    const leftSidebarOpen = useEditorStore((state) => state.leftSidebarOpen);
+    const addObject = useEditorStore((state) => state.addObject);
 
     const [uploading, setUploading] = useState(false);
 

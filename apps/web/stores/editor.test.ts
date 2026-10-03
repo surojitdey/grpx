@@ -8,6 +8,7 @@ describe('Editor Store', () => {
         useEditorStore.setState({
             design: null,
             selectedObjectIds: [],
+            draggedObjectPosition: null,
             activeTool: 'select',
         });
         useEditorStore.getState().resetPersistence(0);
@@ -333,6 +334,50 @@ describe('Editor Store', () => {
     });
 
     describe('text editing', () => {
+        it('persists edited canvas text in the design and marks it dirty', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject({
+                id: 'text-1',
+                type: 'text',
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 50,
+                rotation: 0,
+                scaleX: 1,
+                scaleY: 1,
+                opacity: 1,
+                visible: true,
+                locked: false,
+                zIndex: 0,
+                content: { text: 'Before edit' },
+                style: {
+                    fontFamily: 'Arial',
+                    fontSize: 16,
+                    fontWeight: 400,
+                    fontStyle: 'normal',
+                    color: '#000000',
+                    textAlign: 'left',
+                    lineHeight: 1,
+                    letterSpacing: 0,
+                },
+            });
+            useEditorStore.getState().saveSuccess(1, new Date());
+
+            useEditorStore.getState().updateObject('text-1', {
+                content: { text: 'After edit' },
+            });
+
+            const textObject = useEditorStore
+                .getState()
+                .design?.pages[0].document.objects[0];
+            expect(textObject).toMatchObject({
+                type: 'text',
+                content: { text: 'After edit' },
+            });
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+        });
+
         it('should start editing text', () => {
             useEditorStore.getState().startEditingText('obj-1', 'Hello');
             expect(useEditorStore.getState().editingTextId).toBe('obj-1');
@@ -404,6 +449,29 @@ describe('Editor Store', () => {
             useEditorStore.getState().addObject(makeRect('obj-1'));
             useEditorStore.getState().saveSuccess(1, new Date());
             useEditorStore.getState().updateObject('obj-1', { x: 42 });
+            expect(useEditorStore.getState().persistence.isDirty).toBe(true);
+        });
+
+        it('tracks drag coordinates without persisting until the drag ends', () => {
+            useEditorStore.getState().setDesign(mockDesign);
+            useEditorStore.getState().addObject(makeRect('obj-1'));
+            useEditorStore.getState().saveSuccess(1, new Date());
+
+            useEditorStore.getState().setDraggedObjectPosition({
+                id: 'obj-1',
+                x: 42,
+                y: 64,
+            });
+
+            let object = useEditorStore.getState().design?.pages[0].document.objects[0];
+            expect(object).toMatchObject({ x: 0, y: 0 });
+            expect(useEditorStore.getState().persistence.isDirty).toBe(false);
+
+            useEditorStore.getState().updateObject('obj-1', { x: 42, y: 64 });
+
+            object = useEditorStore.getState().design?.pages[0].document.objects[0];
+            expect(object).toMatchObject({ x: 42, y: 64 });
+            expect(useEditorStore.getState().draggedObjectPosition).toBeNull();
             expect(useEditorStore.getState().persistence.isDirty).toBe(true);
         });
 

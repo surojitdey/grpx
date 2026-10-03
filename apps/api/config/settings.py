@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     'drf_spectacular',
     'django_celery_beat',
     'django_celery_results',
+    'storages',
     
     # Local apps
     'apps.users',
@@ -196,9 +197,35 @@ AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default='')
 AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY', default='')
 AWS_REGION = env('AWS_REGION', default='us-east-1')
 AWS_S3_BUCKET = env('AWS_S3_BUCKET', default='design-platform-assets')
-AWS_S3_CUSTOM_DOMAIN = f'{AWS_S3_BUCKET}.s3.amazonaws.com'
-AWS_S3_URL_PROTOCOL = 'https:'
 AWS_S3_SIGNATURE_VERSION = 's3v4'
+
+# S3 endpoint routing (LocalStack in development)
+AWS_S3_INTERNAL_ENDPOINT_URL = env('AWS_S3_INTERNAL_ENDPOINT_URL', default=None)
+AWS_S3_EXTERNAL_ENDPOINT_URL = env('AWS_S3_EXTERNAL_ENDPOINT_URL', default=None)
+AWS_S3_EXPORT_BUCKET = env('AWS_S3_EXPORT_BUCKET', default='design-platform-exports')
+
+# Django 6 uses STORAGES (DEFAULT_FILE_STORAGE is no longer supported).
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+}
+if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+    STORAGES['default'] = {
+        'BACKEND': 'config.storage.LocalStackAwareS3Storage',
+        'OPTIONS': {
+            'access_key': AWS_ACCESS_KEY_ID,
+            'secret_key': AWS_SECRET_ACCESS_KEY,
+            'region_name': AWS_REGION,
+            'bucket_name': AWS_S3_BUCKET,
+            'endpoint_url': AWS_S3_INTERNAL_ENDPOINT_URL,
+            'signature_version': 's3v4',
+            'addressing_style': 'path',
+            'custom_domain': None,
+            'default_acl': None,
+            'querystring_auth': True,
+            'file_overwrite': False,
+        },
+    }
 
 # Logging
 LOGGING = {

@@ -2,11 +2,18 @@
 Asset views
 """
 
+import logging
+import uuid
+
+from django.db import DatabaseError, transaction
+from django.utils.text import get_valid_filename
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
-from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
-from django.core.files.storage import default_storage
+from rest_framework.response import Response
+
+from apps.common.aws import StorageError, get_storage_service
+
 from .models import Asset
 from .serializers import (
     AssetSerializer,
@@ -14,11 +21,13 @@ from .serializers import (
     AssetCompleteUploadSerializer
 )
 
+logger = logging.getLogger(__name__)
+
 
 class AssetViewSet(viewsets.ModelViewSet):
     """
     Asset management endpoints
-    
+
     Upload, list, and delete images
     """
 
@@ -38,9 +47,9 @@ class AssetViewSet(viewsets.ModelViewSet):
     def direct_upload(self, request):
         """
         Direct file upload endpoint
-        
+
         POST /api/v1/assets/direct-upload/
-        
+
         Form data:
         - file: Image file
         - name: Optional asset name
@@ -53,42 +62,47 @@ class AssetViewSet(viewsets.ModelViewSet):
 
         file = request.FILES['file']
         name = request.POST.get('name', file.name)
+        filename = get_valid_filename(
+            file.name.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+        )
+        key = f'assets/{request.user.id}/{uuid.uuid4().hex}/{filename}'
+        storage = get_storage_service()
+        uploaded = False
 
         try:
-            # Save file using Django's storage system
-            file_path = f'assets/{request.user.id}/{file.name}'
-            url = default_storage.save(file_path, file)
-            relative_url = default_storage.url(url)
-
-            # Build absolute URL for frontend access
-            full_url = request.build_absolute_uri(relative_url)
-
-            # Create asset record
-            asset = Asset.objects.create(
-                owner=request.user,
-                name=name,
-                asset_type='image',
-                storage_key=url,
-                url=full_url,
-                mime_type=file.content_type,
-                file_size=file.size,
-            )
-
-            serializer = AssetSerializer(asset)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            if "url" in locals():
-                default_storage.delete(url)
+            content_type = file.content_type or 'application/octet-stream'
+            storage.upload(key, file, content_type)
+            uploaded = True
+            with transaction.atomic():
+                asset = Asset.objects.create(
+                    owner=request.user,
+                    name=name,
+                    asset_type='image',
+                    storage_key=key,
+                    mime_type=content_type,
+                    file_size=file.size,
+                )
+                data = self.get_serializer(asset).data
+            return Response(data, status=status.HTTP_201_CREATED)
+        except (StorageError, DatabaseError) as exc:
+            if uploaded:
+                try:
+                    storage.delete(key)
+                except StorageError:
+                    logger.exception(
+                        'Failed to clean up uploaded asset %s',
+                        key,
+                    )
             return Response(
-                {'detail': f'Upload failed: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {'detail': f'Upload failed: {exc}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @action(detail=False, methods=['post'])
     def upload_url(self, request):
         """
         Get presigned URL for uploading to S3
-        
+
         POST /api/v1/assets/upload-url/
         {
             "filename": "image.jpg",
@@ -99,22 +113,32 @@ class AssetViewSet(viewsets.ModelViewSet):
         serializer = AssetUploadUrlSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # TODO: Generate presigned URL from S3
-        # For now, return a placeholder
+        submitted_filename = serializer.validated_data['filename']
+        filename = get_valid_filename(
+            submitted_filename.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+        )
+        key = f'assets/{request.user.id}/{uuid.uuid4().hex}/{filename}'
+        upload_url = get_storage_service().generate_presigned_upload_url(
+            key, serializer.validated_data['content_type']
+        )
 
         return Response(
             {
-                'upload_url': 'https://s3.amazonaws.com/...',
-                'storage_key': 'assets/user_123/image_123.jpg'
+                'upload_url': upload_url,
+                'storage_key': key,
             },
             status=status.HTTP_200_OK
         )
+
+    def perform_destroy(self, instance):
+        get_storage_service().delete(instance.storage_key)
+        super().perform_destroy(instance)
 
     @action(detail=False, methods=['post'])
     def complete(self, request):
         """
         Complete upload and create asset record
-        
+
         POST /api/v1/assets/complete/
         {
             "storage_key": "assets/user_123/image_123.jpg",

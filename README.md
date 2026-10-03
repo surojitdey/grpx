@@ -16,6 +16,9 @@ A comprehensive, production-ready visual design platform built with modern web t
 git clone <repo-url>
 cd grpx
 
+# LocalStack requires an auth token. Put it in the ignored root .env file:
+# LOCALSTACK_AUTH_TOKEN=<your-token>
+
 # Start all services
 docker-compose up --build
 
