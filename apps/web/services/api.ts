@@ -1,5 +1,14 @@
 import axios from 'axios';
-import { Design, Template, Asset, ExportJob, User, DesignShare } from '@/types';
+import {
+    Design,
+    Template,
+    Asset,
+    AssetLibraryFilters,
+    ExportJob,
+    PaginatedResponse,
+    User,
+    DesignShare,
+} from '@/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
@@ -389,9 +398,18 @@ export const pageApi = {
 
 // Asset API
 export const assetApi = {
-    getAssets: () => client.get<Asset[]>('/assets/'),
+    getAssets: async (filters: AssetLibraryFilters = {}) => {
+        const response = await client.get<PaginatedResponse<Asset>>(
+            '/assets/',
+            { params: filters },
+        );
+        return { ...response, data: transformKeys(response.data) };
+    },
 
-    getAsset: (id: string) => client.get<Asset>(`/assets/${id}/`),
+    getAsset: async (id: string) => {
+        const response = await client.get<Asset>(`/assets/${id}/`);
+        return { ...response, data: transformKeys(response.data) };
+    },
 
     deleteAsset: (id: string) => client.delete(`/assets/${id}/`),
 

@@ -112,7 +112,8 @@ class AssetUploadViewTestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Asset.objects.count(), 0)
 
-    def test_pending_assets_are_not_returned_by_asset_list(self):
+    @patch('apps.assets.serializers.get_storage_service')
+    def test_asset_library_includes_pending_status(self, get_service):
         Asset.objects.create(
             owner=self.user,
             filename='image.png',
@@ -122,11 +123,141 @@ class AssetUploadViewTestCase(APITestCase):
             storage_key=f'assets/{self.user.pk}/upload-id/image.png',
             status='PENDING',
         )
+        download_url = (
+            get_service.return_value.generate_presigned_download_url
+        )
+        download_url.side_effect = lambda key: (
+            f'https://storage.example/{key}'
+        )
 
         response = self.client.get('/api/v1/assets/')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['results'], [])
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['status'], 'PENDING')
+
+    @patch('apps.assets.serializers.get_storage_service')
+    def test_asset_library_filters_by_owner_status_and_search(
+        self, get_service
+    ):
+        ready_asset = Asset.objects.create(
+            owner=self.user,
+            filename='summer-campaign.png',
+            original_filename='summer-campaign.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{self.user.pk}/ready/summer-campaign.png',
+            thumbnail_key=f'assets/{self.user.pk}/ready/thumbnail.png',
+            status='READY',
+        )
+        Asset.objects.create(
+            owner=self.user,
+            filename='summer-draft.png',
+            original_filename='summer-draft.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{self.user.pk}/processing/summer-draft.png',
+            status='PROCESSING',
+        )
+        other_user = get_user_model().objects.create_user(
+            username='asset-library-other',
+            email='asset-library-other@example.com',
+            password='test-password',
+        )
+        Asset.objects.create(
+            owner=other_user,
+            filename='summer-private.png',
+            original_filename='summer-private.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{other_user.pk}/private/summer-private.png',
+            status='READY',
+        )
+        download_url = (
+            get_service.return_value.generate_presigned_download_url
+        )
+        download_url.side_effect = lambda key: (
+            f'https://storage.example/{key}'
+        )
+
+        response = self.client.get(
+            '/api/v1/assets/?search=summer&status=READY'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        result = response.data['results'][0]
+        self.assertEqual(result['id'], str(ready_asset.pk))
+        self.assertEqual(result['status'], 'READY')
+        self.assertEqual(
+            result['thumbnail_url'],
+            f'https://storage.example/{ready_asset.thumbnail_key}',
+        )
+
+        processing_response = self.client.get(
+            '/api/v1/assets/?status=PROCESSING'
+        )
+        self.assertEqual(processing_response.data['count'], 1)
+        self.assertEqual(
+            processing_response.data['results'][0]['status'],
+            'PROCESSING',
+        )
+
+    @patch('apps.assets.serializers.get_storage_service')
+    def test_asset_library_paginates_with_owner_scoped_count(
+        self, get_service
+    ):
+        for index in range(22):
+            Asset.objects.create(
+                owner=self.user,
+                filename=f'asset-{index}.png',
+                original_filename=f'asset-{index}.png',
+                mime_type='image/png',
+                size=100,
+                storage_key=(
+                    f'assets/{self.user.pk}/library/asset-{index}.png'
+                ),
+                status='READY',
+            )
+        other_user = get_user_model().objects.create_user(
+            username='asset-library-paginate-other',
+            email='asset-library-paginate-other@example.com',
+            password='test-password',
+        )
+        Asset.objects.create(
+            owner=other_user,
+            filename='other.png',
+            original_filename='other.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{other_user.pk}/other.png',
+            status='READY',
+        )
+        download_url = (
+            get_service.return_value.generate_presigned_download_url
+        )
+        download_url.side_effect = lambda key: (
+            f'https://storage.example/{key}'
+        )
+
+        response = self.client.get('/api/v1/assets/?page=2')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 22)
+        self.assertEqual(len(response.data['results']), 2)
+        self.assertIsNotNone(response.data['previous'])
+        self.assertIsNone(response.data['next'])
+        self.assertTrue(
+            all(
+                result['storage_key'].startswith(f'assets/{self.user.pk}/')
+                for result in response.data['results']
+            )
+        )
+
+        sized_response = self.client.get(
+            '/api/v1/assets/?page=1&page_size=5'
+        )
+        self.assertEqual(len(sized_response.data['results']), 5)
 
     @patch('apps.assets.views.process_asset.delay')
     @patch('apps.assets.views.get_storage_service')
