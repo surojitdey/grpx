@@ -4,7 +4,9 @@ Asset views
 
 import uuid
 
+from kombu.exceptions import OperationalError
 from django.db import transaction
+from django.utils import timezone
 from django.utils.text import get_valid_filename
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
@@ -17,8 +19,8 @@ from .models import Asset
 from .serializers import (
     AssetSerializer,
     AssetUploadUrlSerializer,
-    AssetCompleteUploadSerializer
 )
+from .tasks import process_asset
 
 
 def _fit_storage_key_filename(owner_id, filename):
@@ -39,11 +41,13 @@ class AssetViewSet(viewsets.ModelViewSet):
     parser_classes = (JSONParser,)
 
     def get_queryset(self):
-        """Only show ready assets owned by the current user"""
-        return Asset.objects.filter(
-            owner=self.request.user,
-            status='READY',
-        )
+        """Show ready assets, and allow owners to complete pending uploads."""
+        queryset = Asset.objects.filter(owner=self.request.user)
+        if self.action == 'complete':
+            return queryset.filter(
+                status__in=('PENDING', 'PROCESSING', 'FAILED', 'READY')
+            )
+        return queryset.filter(status='READY')
 
     def perform_create(self, serializer):
         """Ensure owner is set to current user"""
@@ -118,38 +122,30 @@ class AssetViewSet(viewsets.ModelViewSet):
         get_storage_service().delete(instance.storage_key)
         super().perform_destroy(instance)
 
-    @action(detail=False, methods=['post'])
-    def complete(self, request):
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
         """
-        Complete upload and move its Asset record to READY
+        Verify an uploaded object and queue asset processing.
 
-        POST /api/v1/assets/complete/
-        {
-            "storage_key": "assets/user_123/image_123.jpg",
-            "name": "My Image",
-            "mime_type": "image/jpeg",
-            "file_size": 1024000,
-            "width": 1920,
-            "height": 1080
-        }
+        POST /api/v1/assets/{id}/complete
         """
-        serializer = AssetCompleteUploadSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        key = data['storage_key']
-        if not key.startswith(f'assets/{request.user.pk}/'):
+        asset = self.get_object()
+        if asset.status == 'READY':
+            return Response(self.get_serializer(asset).data)
+        if asset.status == 'PROCESSING':
             return Response(
-                {
-                    'detail': (
-                        'The uploaded object does not belong to this user.'
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+                self.get_serializer(asset).data,
+                status=status.HTTP_202_ACCEPTED,
+            )
+        if asset.status not in ('PENDING', 'FAILED'):
+            return Response(
+                {'detail': f'Asset cannot be completed from status {asset.status}.'},
+                status=status.HTTP_409_CONFLICT,
             )
 
         storage = get_storage_service()
         try:
-            if not storage.exists(key):
+            if not storage.exists(asset.storage_key):
                 return Response(
                     {
                         'detail': (
@@ -160,70 +156,55 @@ class AssetViewSet(viewsets.ModelViewSet):
                 )
 
             with transaction.atomic():
-                asset = Asset.objects.select_for_update().filter(
+                asset = Asset.objects.select_for_update().get(
+                    pk=asset.pk,
                     owner=request.user,
-                    storage_key=key,
-                ).first()
-                created = asset is None
-                if asset is None:
-                    filename = get_valid_filename(key.rsplit('/', 1)[-1])
-                    asset = Asset.objects.create(
-                        owner=request.user,
-                        filename=filename,
-                        original_filename=data['name'],
-                        storage_key=key,
-                        mime_type=data['mime_type'],
-                        size=data['file_size'],
-                        width=data.get('width'),
-                        height=data.get('height'),
-                        status='READY',
+                )
+                if asset.status in ('PROCESSING', 'READY'):
+                    response_status = (
+                        status.HTTP_202_ACCEPTED
+                        if asset.status == 'PROCESSING'
+                        else status.HTTP_200_OK
                     )
-                else:
-                    if (
-                        asset.mime_type != data['mime_type']
-                        or asset.size != data['file_size']
-                    ):
-                        return Response(
-                            {
-                                'detail': (
-                                    'Upload metadata does not match the '
-                                    'requested asset.'
-                                )
-                            },
-                            status=status.HTTP_400_BAD_REQUEST,
-                        )
-                    if asset.status not in ('PENDING', 'READY'):
-                        return Response(
-                            {
-                                'detail': (
-                                    f'Asset cannot be completed from status '
-                                    f'{asset.status}.'
-                                )
-                            },
-                            status=status.HTTP_400_BAD_REQUEST,
-                        )
-                    asset.width = data.get('width', asset.width)
-                    asset.height = data.get('height', asset.height)
-                    asset.status = 'READY'
-                    asset.save(
-                        update_fields=[
-                            'width',
-                            'height',
-                            'status',
-                            'updated_at',
-                        ]
+                    return Response(
+                        self.get_serializer(asset).data,
+                        status=response_status,
                     )
-                response_data = self.get_serializer(asset).data
+                if asset.status not in ('PENDING', 'FAILED'):
+                    return Response(
+                        {
+                            'detail': (
+                                f'Asset cannot be completed from status '
+                                f'{asset.status}.'
+                            )
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                asset.status = 'PROCESSING'
+                asset.save(update_fields=['status', 'updated_at'])
         except StorageError as exc:
             return Response(
-                {'detail': f'Upload completion failed: {exc}'},
+                {'detail': f'Upload verification failed: {exc}'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+
+        try:
+            process_asset.delay(str(asset.pk))
+        except OperationalError as exc:
+            Asset.objects.filter(
+                pk=asset.pk,
+                status='PROCESSING',
+            ).update(
+                status='PENDING',
+                updated_at=timezone.now(),
+            )
+            return Response(
+                {'detail': f'Asset processing could not be queued: {exc}'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        asset.refresh_from_db()
         return Response(
-            response_data,
-            status=(
-                status.HTTP_201_CREATED
-                if created
-                else status.HTTP_200_OK
-            ),
+            self.get_serializer(asset).data,
+            status=status.HTTP_202_ACCEPTED,
         )

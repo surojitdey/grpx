@@ -1,3 +1,4 @@
+from io import BytesIO
 from unittest import TestCase
 from unittest.mock import Mock, call, patch
 from urllib.parse import parse_qs, urlparse
@@ -28,6 +29,29 @@ class S3StorageServiceTestCase(TestCase):
         self.client.delete_object.assert_called_once_with(
             Bucket='test-assets',
             Key='assets/1/image.png',
+        )
+
+    def test_download_reads_the_object_from_the_configured_bucket(self):
+        self.client.get_object.return_value = {'Body': BytesIO(b'image-data')}
+
+        content = self.storage.download('assets/1/image.png')
+
+        self.assertEqual(content, b'image-data')
+        self.client.get_object.assert_called_once_with(
+            Bucket='test-assets',
+            Key='assets/1/image.png',
+        )
+
+    def test_put_thumbnail_saves_png_to_the_configured_bucket(self):
+        content = b'thumbnail-data'
+
+        self.storage.put_thumbnail('assets/1/.thumbnails/1.png', content)
+
+        self.client.put_object.assert_called_once_with(
+            Bucket='test-assets',
+            Key='assets/1/.thumbnails/1.png',
+            Body=content,
+            ContentType='image/png',
         )
 
     def test_exists_checks_the_configured_bucket(self):

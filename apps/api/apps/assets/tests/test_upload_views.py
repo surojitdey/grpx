@@ -1,8 +1,10 @@
+import uuid
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase
+from kombu.exceptions import OperationalError
 
 from apps.assets.models import Asset
 
@@ -98,10 +100,11 @@ class AssetUploadViewTestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['results'], [])
 
+    @patch('apps.assets.views.process_asset.delay')
     @patch('apps.assets.views.get_storage_service')
     @patch('apps.assets.serializers.get_storage_service')
-    def test_complete_moves_upload_url_asset_from_pending_to_ready(
-        self, get_serializer_service, get_view_service
+    def test_complete_moves_upload_url_asset_to_processing_and_queues_task(
+        self, get_serializer_service, get_view_service, queue_task
     ):
         storage = Mock()
         storage.generate_presigned_upload_url.return_value = (
@@ -127,94 +130,113 @@ class AssetUploadViewTestCase(APITestCase):
         self.assertEqual(asset.status, 'PENDING')
 
         response = self.client.post(
-            '/api/v1/assets/complete/',
-            {
-                'storage_key': upload_response.data['storage_key'],
-                'name': 'image.png',
-                'mime_type': 'image/png',
-                'file_size': 100,
-                'width': 1920,
-                'height': 1080,
-            },
+            f'/api/v1/assets/{asset.pk}/complete',
+            {},
             format='json',
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         asset.refresh_from_db()
-        self.assertEqual(asset.status, 'READY')
-        self.assertEqual((asset.width, asset.height), (1920, 1080))
+        self.assertEqual(asset.status, 'PROCESSING')
+        queue_task.assert_called_once_with(str(asset.pk))
 
     @patch('apps.assets.views.get_storage_service')
-    @patch('apps.assets.serializers.get_storage_service')
-    def test_complete_creates_an_asset_only_after_object_exists(
-        self, get_serializer_service, get_view_service
-    ):
-        storage = Mock()
-        storage.exists.return_value = True
-        storage.generate_presigned_download_url.return_value = (
-            'http://localhost:4566/presigned-download'
-        )
-        get_view_service.return_value = storage
-        get_serializer_service.return_value = storage
-        key = f'assets/{self.user.pk}/upload-id/image.png'
+    def test_complete_requires_an_asset_created_by_upload_url(self, get_service):
+        storage = get_service.return_value
 
         response = self.client.post(
-            '/api/v1/assets/complete/',
-            {
-                'storage_key': key,
-                'name': 'image.png',
-                'mime_type': 'image/png',
-                'file_size': 100,
-            },
+            f'/api/v1/assets/{uuid.uuid4()}/complete',
+            {},
             format='json',
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(
-            response.data['url'],
-            'http://localhost:4566/presigned-download',
-        )
-        asset = Asset.objects.get(storage_key=key)
-        self.assertEqual(asset.owner, self.user)
-        self.assertEqual(asset.mime_type, 'image/png')
-        self.assertEqual(asset.size, 100)
-        self.assertEqual(asset.status, 'READY')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        storage.exists.assert_not_called()
+        self.assertEqual(Asset.objects.count(), 0)
 
+    @patch('apps.assets.views.process_asset.delay')
     @patch('apps.assets.views.get_storage_service')
-    def test_complete_rejects_a_missing_object(self, get_service):
+    def test_complete_rejects_a_missing_object(
+        self, get_service, queue_task
+    ):
+        asset = Asset.objects.create(
+            owner=self.user,
+            filename='missing.png',
+            original_filename='missing.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{self.user.pk}/upload-id/missing.png',
+            status='PENDING',
+        )
         storage = Mock()
         storage.exists.return_value = False
         get_service.return_value = storage
 
         response = self.client.post(
-            '/api/v1/assets/complete/',
-            {
-                'storage_key': f'assets/{self.user.pk}/upload-id/missing.png',
-                'name': 'missing.png',
-                'mime_type': 'image/png',
-                'file_size': 100,
-            },
+            f'/api/v1/assets/{asset.pk}/complete',
+            {},
             format='json',
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(Asset.objects.count(), 0)
+        asset.refresh_from_db()
+        self.assertEqual(asset.status, 'PENDING')
+        get_service.return_value.exists.assert_called_once_with(
+            asset.storage_key
+        )
 
     @patch('apps.assets.views.get_storage_service')
-    def test_complete_rejects_a_key_owned_by_another_user(self, get_service):
-        storage = get_service.return_value
+    def test_complete_rejects_an_asset_owned_by_another_user(self, get_service):
+        other_user = get_user_model().objects.create_user(
+            username='other-asset-owner',
+            email='other-asset-owner@example.com',
+            password='test-password',
+        )
+        asset = Asset.objects.create(
+            owner=other_user,
+            filename='image.png',
+            original_filename='image.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{other_user.pk}/upload-id/image.png',
+            status='PENDING',
+        )
 
         response = self.client.post(
-            '/api/v1/assets/complete/',
-            {
-                'storage_key': 'assets/999/upload-id/image.png',
-                'name': 'image.png',
-                'mime_type': 'image/png',
-                'file_size': 100,
-            },
+            f'/api/v1/assets/{asset.pk}/complete',
+            {},
             format='json',
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        storage.exists.assert_not_called()
-        self.assertEqual(Asset.objects.count(), 0)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        get_service.return_value.exists.assert_not_called()
+
+    @patch('apps.assets.views.process_asset.delay')
+    @patch('apps.assets.views.get_storage_service')
+    def test_complete_resets_asset_if_processing_cannot_be_queued(
+        self, get_service, queue_task
+    ):
+        asset = Asset.objects.create(
+            owner=self.user,
+            filename='image.png',
+            original_filename='image.png',
+            mime_type='image/png',
+            size=100,
+            storage_key=f'assets/{self.user.pk}/upload-id/image.png',
+            status='PENDING',
+        )
+        get_service.return_value.exists.return_value = True
+        queue_task.side_effect = OperationalError('broker unavailable')
+
+        response = self.client.post(
+            f'/api/v1/assets/{asset.pk}/complete',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+        asset.refresh_from_db()
+        self.assertEqual(asset.status, 'PENDING')
