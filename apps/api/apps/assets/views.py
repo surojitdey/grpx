@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from apps.common.aws import StorageError, get_storage_service
 
 from .models import Asset
+from .pagination import AssetPagination
 from .serializers import (
     AssetSerializer,
     AssetUploadUrlSerializer,
@@ -40,15 +41,31 @@ class AssetViewSet(viewsets.ModelViewSet):
     serializer_class = AssetSerializer
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = (JSONParser,)
+    pagination_class = AssetPagination
+    filterset_fields = ['status']
+    search_fields = ['filename', 'original_filename', 'mime_type']
+    ordering_fields = [
+        'created_at',
+        'updated_at',
+        'filename',
+        'size',
+        'status',
+    ]
+    ordering = ['-created_at', 'id']
 
     def get_queryset(self):
-        """Show ready assets, and allow owners to complete pending uploads."""
+        """Restrict asset operations and library results to the owner."""
         queryset = Asset.objects.filter(owner=self.request.user)
         if self.action == 'complete':
             return queryset.filter(
-                status__in=('PENDING', 'PROCESSING', 'FAILED', 'READY')
+                status__in=(
+                    'PENDING',
+                    'PROCESSING',
+                    'FAILED',
+                    'READY',
+                )
             )
-        return queryset.filter(status='READY')
+        return queryset
 
     def perform_create(self, serializer):
         """Ensure owner is set to current user"""

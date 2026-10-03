@@ -117,17 +117,46 @@ export interface PersistenceState {
 }
 
 // Asset types
+export type AssetStatus =
+    | 'PENDING'
+    | 'PROCESSING'
+    | 'READY'
+    | 'FAILED'
+    | 'DELETED';
+
 export interface Asset {
     id: string;
+    filename: string;
+    originalFilename: string;
     name: string;
-    type: 'image' | 'video';
+    assetType: 'image' | 'video';
     url: string;
     thumbnailUrl: string;
     mimeType: string;
+    size: number;
     fileSize: number;
-    width: number;
-    height: number;
+    width: number | null;
+    height: number | null;
+    storageKey: string;
+    thumbnailKey: string;
+    status: AssetStatus;
     createdAt: string;
+    updatedAt: string;
+}
+
+export interface AssetLibraryFilters {
+    page?: number;
+    page_size?: number;
+    search?: string;
+    status?: AssetStatus;
+    ordering?: string;
+}
+
+export interface PaginatedResponse<T> {
+    count: number;
+    next: string | null;
+    previous: string | null;
+    results: T[];
 }
 
 // Template types

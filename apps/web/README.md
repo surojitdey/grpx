@@ -157,6 +157,14 @@ await pageApi.movePage(designId, pageId, { index: 1 });
 
 // Upload an asset using a presigned S3 PUT, then register it with the API
 const asset = await assetApi.directUpload(file);
+
+// Browse the current user's assets (page_size is optional, up to 100)
+const page = await assetApi.getAssets({
+    page: 1,
+    page_size: 40,
+    status: 'READY',
+    search: 'campaign',
+});
 ```
 
 Asset uploads accept JPEG, PNG, WebP, and GIF files up to 100 MiB. The
