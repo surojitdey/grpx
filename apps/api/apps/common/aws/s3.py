@@ -46,6 +46,24 @@ class S3StorageService:
         except BotoCoreError as exc:
             raise StorageError('check existence', key, exc) from exc
 
+    def get_object_metadata(self, key: str) -> tuple[int, str] | None:
+        try:
+            response = self.client.head_object(
+                Bucket=self.bucket_name,
+                Key=key,
+            )
+        except ClientError as exc:
+            code = exc.response.get('Error', {}).get('Code')
+            if code in {'404', 'NoSuchKey', 'NotFound'}:
+                return None
+            raise StorageError('check object metadata', key, exc) from exc
+        except BotoCoreError as exc:
+            raise StorageError('check object metadata', key, exc) from exc
+        return (
+            response['ContentLength'],
+            response.get('ContentType', ''),
+        )
+
     def download(self, key: str) -> bytes:
         try:
             response = self.client.get_object(

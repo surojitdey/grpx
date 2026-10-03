@@ -21,6 +21,7 @@ from .serializers import (
     AssetUploadUrlSerializer,
 )
 from .tasks import process_asset
+from .validation import MAX_UPLOAD_SIZE
 
 
 def _fit_storage_key_filename(owner_id, filename):
@@ -139,17 +140,38 @@ class AssetViewSet(viewsets.ModelViewSet):
             )
         if asset.status not in ('PENDING', 'FAILED'):
             return Response(
-                {'detail': f'Asset cannot be completed from status {asset.status}.'},
+                {
+                    'detail': (
+                        f'Asset cannot be completed from status '
+                        f'{asset.status}.'
+                    )
+                },
                 status=status.HTTP_409_CONFLICT,
             )
 
         storage = get_storage_service()
         try:
-            if not storage.exists(asset.storage_key):
+            metadata = storage.get_object_metadata(asset.storage_key)
+            if metadata is None:
                 return Response(
                     {
                         'detail': (
                             'The uploaded object was not found in storage.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            object_size, object_content_type = metadata
+            if (
+                object_size > MAX_UPLOAD_SIZE
+                or object_size != asset.size
+                or object_content_type.lower() != asset.mime_type
+            ):
+                return Response(
+                    {
+                        'detail': (
+                            'Uploaded object size or content type does not '
+                            'match the requested asset.'
                         )
                     },
                     status=status.HTTP_400_BAD_REQUEST,

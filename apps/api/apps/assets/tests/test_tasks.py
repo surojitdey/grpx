@@ -7,6 +7,7 @@ from PIL import Image, UnidentifiedImageError
 
 from apps.assets.models import Asset
 from apps.assets.tasks import process_asset
+from apps.assets.validation import AssetValidationError
 
 
 class ProcessAssetTaskTestCase(TestCase):
@@ -33,8 +34,11 @@ class ProcessAssetTaskTestCase(TestCase):
         asset = self.create_asset()
         source = BytesIO()
         Image.new('RGB', (800, 400), color='red').save(source, format='PNG')
+        content = source.getvalue()
+        asset.size = len(content)
+        asset.save(update_fields=['size'])
         storage = get_service.return_value
-        storage.download.return_value = source.getvalue()
+        storage.download.return_value = content
 
         process_asset.run(str(asset.pk))
 
@@ -68,6 +72,24 @@ class ProcessAssetTaskTestCase(TestCase):
         get_service.return_value.download.return_value = b'not an image'
 
         with self.assertRaises(UnidentifiedImageError):
+            process_asset.run(str(asset.pk))
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.status, 'FAILED')
+
+    @patch('apps.assets.tasks.get_storage_service')
+    def test_rejects_content_that_disagrees_with_extension_and_mime_type(
+        self, get_service
+    ):
+        asset = self.create_asset()
+        source = BytesIO()
+        Image.new('RGB', (16, 16), color='blue').save(source, format='WEBP')
+        content = source.getvalue()
+        asset.size = len(content)
+        asset.save(update_fields=['size'])
+        get_service.return_value.download.return_value = content
+
+        with self.assertRaises(AssetValidationError):
             process_asset.run(str(asset.pk))
 
         asset.refresh_from_db()

@@ -7,8 +7,11 @@ from rest_framework import serializers
 from apps.common.aws import get_storage_service
 
 from .models import Asset
-
-MIME_TYPE_PATTERN = r'^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$'
+from .validation import (
+    MAX_UPLOAD_SIZE,
+    AssetValidationError,
+    validate_upload_metadata,
+)
 
 
 class AssetSerializer(serializers.ModelSerializer):
@@ -50,11 +53,19 @@ class AssetUploadUrlSerializer(serializers.Serializer):
     """Request for presigned upload URL"""
 
     filename = serializers.CharField(max_length=255)
-    content_type = serializers.RegexField(
-        regex=MIME_TYPE_PATTERN,
-        max_length=50,
-    )
+    content_type = serializers.CharField(max_length=50)
     file_size = serializers.IntegerField(
         min_value=1,
-        max_value=100 * 1024 * 1024,
+        max_value=MAX_UPLOAD_SIZE,
     )
+
+    def validate(self, attrs):
+        content_type = attrs['content_type'].lower()
+        try:
+            validate_upload_metadata(attrs['filename'], content_type)
+        except AssetValidationError as exc:
+            raise serializers.ValidationError(
+                {'filename': [str(exc)]}
+            ) from exc
+        attrs['content_type'] = content_type
+        return attrs

@@ -187,7 +187,7 @@ export default function LeftSidebar() {
                         <div className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center">
                             <input
                                 type="file"
-                                accept="image/*"
+                                accept=".jpg,.jpeg,.png,.webp,.gif"
                                 className="hidden"
                                 id="image-upload"
                                 disabled={uploading}
