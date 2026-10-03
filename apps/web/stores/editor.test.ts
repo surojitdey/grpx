@@ -452,7 +452,7 @@ describe('Editor Store', () => {
             expect(useEditorStore.getState().persistence.isDirty).toBe(true);
         });
 
-        it('tracks drag coordinates without persisting until the drag ends', () => {
+        it('tracks object transforms without persisting until the transform ends', () => {
             useEditorStore.getState().setDesign(mockDesign);
             useEditorStore.getState().addObject(makeRect('obj-1'));
             useEditorStore.getState().saveSuccess(1, new Date());
@@ -461,13 +461,24 @@ describe('Editor Store', () => {
                 id: 'obj-1',
                 x: 42,
                 y: 64,
+                width: 140,
+                height: 120,
             });
 
             let object = useEditorStore.getState().design?.pages[0].document.objects[0];
-            expect(object).toMatchObject({ x: 0, y: 0 });
+            expect(object).toMatchObject({ x: 0, y: 0, width: 100, height: 100 });
+            expect(useEditorStore.getState().draggedObjectPosition).toMatchObject({
+                width: 140,
+                height: 120,
+            });
             expect(useEditorStore.getState().persistence.isDirty).toBe(false);
 
-            useEditorStore.getState().updateObject('obj-1', { x: 42, y: 64 });
+            useEditorStore.getState().updateObject('obj-1', {
+                x: 42,
+                y: 64,
+                scaleX: 1.4,
+                scaleY: 1.2,
+            });
 
             object = useEditorStore.getState().design?.pages[0].document.objects[0];
             expect(object).toMatchObject({ x: 42, y: 64 });

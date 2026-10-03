@@ -95,8 +95,13 @@ export default function Canvas() {
         // Track whether this effect's canvas is still "alive" so async callbacks
         // (like image loaders) don't mutate a disposed or recreated canvas.
         let effectAlive = true;
-        let pendingDraggedPosition: { id: string; x: number; y: number } | null =
-            null;
+        let pendingDraggedPosition: {
+            id: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+        } | null = null;
         let draggedPositionFrame: number | null = null;
 
         const cancelDraggedPositionUpdate = () => {
@@ -281,12 +286,14 @@ export default function Canvas() {
         };
         fabricCanvas.on('selection:cleared', handleSelectionCleared);
 
-        const handleObjectMoving = (event: any) => {
+        const handleObjectTransforming = (event: any) => {
             const target = event.target;
             if (
                 !target?.objId ||
                 typeof target.left !== 'number' ||
-                typeof target.top !== 'number'
+                typeof target.top !== 'number' ||
+                typeof target.width !== 'number' ||
+                typeof target.height !== 'number'
             ) {
                 return;
             }
@@ -294,6 +301,12 @@ export default function Canvas() {
                 id: target.objId,
                 x: target.left,
                 y: target.top,
+                width:
+                    target.width *
+                    Math.abs(typeof target.scaleX === 'number' ? target.scaleX : 1),
+                height:
+                    target.height *
+                    Math.abs(typeof target.scaleY === 'number' ? target.scaleY : 1),
             };
             if (draggedPositionFrame !== null) return;
 
@@ -323,10 +336,20 @@ export default function Canvas() {
             const object = page?.document.objects.find(
                 (item) => item.id === target.objId
             );
+            const scaleX =
+                typeof target.scaleX === 'number'
+                    ? target.scaleX
+                    : object?.scaleX ?? 1;
+            const scaleY =
+                typeof target.scaleY === 'number'
+                    ? target.scaleY
+                    : object?.scaleY ?? 1;
             if (object?.type === 'text' && typeof target.text === 'string') {
                 updateObject(target.objId, {
                     x: target.left,
                     y: target.top,
+                    scaleX,
+                    scaleY,
                     content: { ...object.content, text: target.text },
                 });
                 return;
@@ -334,10 +357,13 @@ export default function Canvas() {
             updateObject(target.objId, {
                 x: target.left,
                 y: target.top,
+                scaleX,
+                scaleY,
             });
         };
 
-        fabricCanvas.on('object:moving', handleObjectMoving);
+        fabricCanvas.on('object:moving', handleObjectTransforming);
+        fabricCanvas.on('object:scaling', handleObjectTransforming);
         fabricCanvas.on('object:modified', handleObjectModified);
 
         // Handle adding objects when a tool is active
@@ -386,7 +412,8 @@ export default function Canvas() {
             fabricCanvas.off('selection:created', handleSelection);
             fabricCanvas.off('selection:updated', handleSelection);
             fabricCanvas.off('selection:cleared', handleSelectionCleared);
-            fabricCanvas.off('object:moving', handleObjectMoving);
+            fabricCanvas.off('object:moving', handleObjectTransforming);
+            fabricCanvas.off('object:scaling', handleObjectTransforming);
             fabricCanvas.off('object:modified', handleObjectModified);
             fabricCanvas.off('mouse:down', handlePointerDown);
             fabricCanvas.dispose();

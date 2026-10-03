@@ -199,9 +199,23 @@ AWS_REGION = env('AWS_REGION', default='us-east-1')
 AWS_S3_BUCKET = env('AWS_S3_BUCKET', default='design-platform-assets')
 AWS_S3_SIGNATURE_VERSION = 's3v4'
 
-# S3 endpoint routing (LocalStack in development)
-AWS_S3_INTERNAL_ENDPOINT_URL = env('AWS_S3_INTERNAL_ENDPOINT_URL', default=None)
-AWS_S3_EXTERNAL_ENDPOINT_URL = env('AWS_S3_EXTERNAL_ENDPOINT_URL', default=None)
+# S3 endpoint routing. The AWS_S3_* names remain aliases for older deployments.
+AWS_INTERNAL_ENDPOINT_URL = (
+    env(
+        'AWS_INTERNAL_ENDPOINT_URL',
+        default=env('AWS_S3_INTERNAL_ENDPOINT_URL', default=None),
+    )
+    or None
+)
+AWS_EXTERNAL_ENDPOINT_URL = (
+    env(
+        'AWS_EXTERNAL_ENDPOINT_URL',
+        default=env('AWS_S3_EXTERNAL_ENDPOINT_URL', default=None),
+    )
+    or None
+)
+AWS_S3_INTERNAL_ENDPOINT_URL = AWS_INTERNAL_ENDPOINT_URL
+AWS_S3_EXTERNAL_ENDPOINT_URL = AWS_EXTERNAL_ENDPOINT_URL
 AWS_S3_EXPORT_BUCKET = env('AWS_S3_EXPORT_BUCKET', default='design-platform-exports')
 
 # Django 6 uses STORAGES (DEFAULT_FILE_STORAGE is no longer supported).

@@ -11,7 +11,13 @@ interface EditorState {
     // UI state
     activeTool: 'select' | 'text' | 'rectangle' | 'circle' | 'line' | 'image';
     selectedObjectIds: string[];
-    draggedObjectPosition: { id: string; x: number; y: number } | null;
+    draggedObjectPosition: {
+        id: string;
+        x: number;
+        y: number;
+        width?: number;
+        height?: number;
+    } | null;
     zoom: number;
     panX: number;
     panY: number;
@@ -44,7 +50,13 @@ interface EditorState {
     setActiveTool: (tool: string) => void;
     setSelectedObjects: (ids: string[]) => void;
     setDraggedObjectPosition: (
-        position: { id: string; x: number; y: number } | null
+        position: {
+            id: string;
+            x: number;
+            y: number;
+            width?: number;
+            height?: number;
+        } | null
     ) => void;
     addSelectedObject: (id: string) => void;
     removeSelectedObject: (id: string) => void;

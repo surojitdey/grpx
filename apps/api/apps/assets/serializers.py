@@ -48,6 +48,9 @@ class AssetCompleteUploadSerializer(serializers.Serializer):
     storage_key = serializers.CharField(max_length=255)
     name = serializers.CharField(max_length=255)
     mime_type = serializers.CharField(max_length=50)
-    file_size = serializers.IntegerField()
-    width = serializers.IntegerField(required=False)
-    height = serializers.IntegerField(required=False)
+    file_size = serializers.IntegerField(
+        min_value=1,
+        max_value=100 * 1024 * 1024,
+    )
+    width = serializers.IntegerField(required=False, min_value=1)
+    height = serializers.IntegerField(required=False, min_value=1)

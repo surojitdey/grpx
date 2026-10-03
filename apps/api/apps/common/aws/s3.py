@@ -49,6 +49,18 @@ class S3StorageService:
         except (BotoCoreError, ClientError) as exc:
             raise StorageError('delete', key, exc) from exc
 
+    def exists(self, key: str) -> bool:
+        try:
+            self.client.head_object(Bucket=self.bucket_name, Key=key)
+            return True
+        except ClientError as exc:
+            code = exc.response.get('Error', {}).get('Code')
+            if code in {'404', 'NoSuchKey', 'NotFound'}:
+                return False
+            raise StorageError('check existence', key, exc) from exc
+        except BotoCoreError as exc:
+            raise StorageError('check existence', key, exc) from exc
+
     def generate_presigned_upload_url(
         self, key: str, content_type: str
     ) -> str:
